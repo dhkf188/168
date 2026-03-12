@@ -17,7 +17,14 @@ from sqlalchemy.orm import relationship
 from server_database import Base
 from datetime import datetime, timedelta
 from server_config import Config
-from server_timezone import get_utc_now, to_beijing_time, make_aware, BEIJING_TZ
+from server_timezone import (
+    get_utc_now,
+    to_beijing_time,
+    make_aware,
+    make_naive,
+    BEIJING_TZ,
+    UTC,
+)
 
 
 class User(Base):
@@ -79,16 +86,15 @@ class Employee(Base):
     @property
     def today_screenshots(self):
         """今日截图数量"""
-        # 🚀 获取今天的开始和结束时间（UTC）
-        from server_timezone import get_utc_now
+        from server_timezone import get_utc_now, make_naive
 
         now_utc = get_utc_now()
         today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = today_start + timedelta(days=1)
 
-        # 🚀 转换为 naive 用于数据库查询
-        today_start_naive = today_start.replace(tzinfo=None)
-        today_end_naive = today_end.replace(tzinfo=None)
+        # 转换为 naive 用于数据库查询
+        today_start_naive = make_naive(today_start)
+        today_end_naive = make_naive(today_end)
 
         return sum(
             1
@@ -101,26 +107,27 @@ class Employee(Base):
         """最后活跃时间"""
         if not self.screenshots:
             return None
-        # 🚀 返回 aware 时间
+        # 返回 aware 时间
         last = max(s.screenshot_time for s in self.screenshots)
         return make_aware(last, BEIJING_TZ)
 
     @property
     def online_clients(self):
         """在线客户端数量"""
-        # 🚀 使用 UTC 时间判断
-        now_utc = get_utc_now()
-        now_naive = now_utc.replace(tzinfo=None)
+        from server_timezone import get_utc_now, make_naive
+
+        now_naive = make_naive(get_utc_now())
 
         count = 0
         for c in self.clients:
             if c.last_seen:
-                if (now_naive - c.last_seen) < timedelta(minutes=10):
+                last_naive = c._get_naive_last_seen()
+                if (now_naive - last_naive) < timedelta(minutes=10):
                     count += 1
         return count
 
     def to_dict(self):
-        """增强的 to_dict 方法 - 统一版本"""
+        """增强的 to_dict 方法"""
         from server_timezone import format_beijing_time
 
         return {
@@ -138,7 +145,7 @@ class Employee(Base):
             "online_clients": self.online_clients,
             "client_count": len(self.clients),
             "has_active_clients": self.has_active_clients,
-            "is_online": self.has_active_clients,
+            "is_online": self.has_active_clients,  # 别名，方便前端
             "last_active": (
                 format_beijing_time(self.last_active) if self.last_active else None
             ),
@@ -165,16 +172,14 @@ class Employee(Base):
         if not self.clients:
             return False
 
-        # 🚀 使用 UTC 时间判断
-        from server_timezone import get_utc_now
+        from server_timezone import get_utc_now, make_naive
 
-        now_utc = get_utc_now()
-        now_naive = now_utc.replace(tzinfo=None)
+        now_naive = make_naive(get_utc_now())
 
         for client in self.clients:
             if client.last_seen:
-                # client.last_seen 是 naive UTC
-                if (now_naive - client.last_seen) < timedelta(minutes=10):
+                last_naive = client._get_naive_last_seen()
+                if (now_naive - last_naive) < timedelta(minutes=10):
                     return True
         return False
 
@@ -214,8 +219,6 @@ class Client(Base):
     last_seen = Column(DateTime(timezone=True), default=func.now(), index=True)
     last_stats = Column(JSON, nullable=True)
 
-    # ===== 修改这里：使用 lambda 函数从 Config 读取配置 =====
-
     config = Column(
         JSON,
         default=lambda: {
@@ -226,7 +229,6 @@ class Client(Base):
             "enable_batch_upload": True,
         },
     )
-    # ====================================================
 
     capabilities = Column(JSON, default=[])
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -235,17 +237,41 @@ class Client(Base):
     employee = relationship("Employee", back_populates="clients")
     screenshots = relationship("Screenshot", back_populates="client")
 
+    def _get_naive_last_seen(self):
+        """获取 naive 版本的 last_seen（辅助方法）"""
+        if not self.last_seen:
+            return None
+        if self.last_seen.tzinfo is not None:
+            return self.last_seen.replace(tzinfo=None)
+        return self.last_seen
+
     @property
     def is_online(self):
-        """是否在线"""
+        """是否在线 - 修复版"""
         if not self.last_seen:
             return False
-        # 🚀 使用 UTC 时间判断
-        now_utc = get_utc_now()
-        now_naive = now_utc.replace(tzinfo=None)
-        return (now_naive - self.last_seen) < timedelta(minutes=10)
+
+        from server_timezone import get_utc_now, make_naive
+
+        # 获取当前UTC时间并确保是 naive
+        now_naive = make_naive(get_utc_now())
+
+        # 获取 naive 版本的 last_seen
+        last_naive = self._get_naive_last_seen()
+
+        return (now_naive - last_naive) < timedelta(minutes=10)
 
     def to_dict(self):
+        """转换为字典 - 修复版"""
+        from server_timezone import format_beijing_time
+
+        # 获取 last_seen 的 ISO 格式（用于显示）
+        last_seen_iso = None
+        if self.last_seen:
+            # 转换为北京时间用于显示
+            last_seen_beijing = to_beijing_time(self.last_seen)
+            last_seen_iso = last_seen_beijing.isoformat()
+
         return {
             "client_id": self.client_id,
             "employee_id": self.employee_id,
@@ -255,11 +281,13 @@ class Client(Base):
             "mac_address": self.mac_address,
             "os_version": self.os_version,
             "client_version": self.client_version,
-            "last_seen": self.last_seen.isoformat() if self.last_seen else None,
-            "is_online": self.is_online,
+            "last_seen": last_seen_iso,  # 北京时间 ISO 格式
+            "is_online": self.is_online,  # 现在正确计算
             "config": self.config,
             "capabilities": self.capabilities,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_at": (
+                format_beijing_time(self.created_at) if self.created_at else None
+            ),
         }
 
 
@@ -297,18 +325,34 @@ class Screenshot(Base):
 
     @property
     def age_hours(self):
-        if self.screenshot_time:
-            now = datetime.utcnow()
-            # 确保两个时间都是 naive（无时区）
-            if self.screenshot_time.tzinfo is not None:
-                shot_time = self.screenshot_time.replace(tzinfo=None)
-            else:
-                shot_time = self.screenshot_time
-            delta = now - shot_time
-            return delta.total_seconds() / 3600
-        return 0
+        """截图存在时间（小时）- 修复版"""
+        if not self.screenshot_time:
+            return 0
+
+        from server_timezone import get_utc_now, make_naive
+
+        now_naive = make_naive(get_utc_now())
+        shot_naive = self._get_naive_screenshot_time()
+
+        delta = now_naive - shot_naive
+        return delta.total_seconds() / 3600
+
+    def _get_naive_screenshot_time(self):
+        """获取 naive 版本的 screenshot_time"""
+        if not self.screenshot_time:
+            return None
+        if self.screenshot_time.tzinfo is not None:
+            return self.screenshot_time.replace(tzinfo=None)
+        return self.screenshot_time
 
     def to_dict(self):
+        """转换为字典"""
+        from server_timezone import format_beijing_time
+
+        screenshot_time_beijing = None
+        if self.screenshot_time:
+            screenshot_time_beijing = to_beijing_time(self.screenshot_time)
+
         return {
             "id": self.id,
             "employee_id": self.employee_id,
@@ -320,9 +364,21 @@ class Screenshot(Base):
             "size_str": self._format_size(self.file_size),
             "width": self.width,
             "height": self.height,
-            "time": self.screenshot_time.strftime("%H:%M:%S"),
-            "date": self.screenshot_time.strftime("%Y-%m-%d"),
-            "datetime": self.screenshot_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "time": (
+                screenshot_time_beijing.strftime("%H:%M:%S")
+                if screenshot_time_beijing
+                else None
+            ),
+            "date": (
+                screenshot_time_beijing.strftime("%Y-%m-%d")
+                if screenshot_time_beijing
+                else None
+            ),
+            "datetime": (
+                screenshot_time_beijing.strftime("%Y-%m-%d %H:%M:%S")
+                if screenshot_time_beijing
+                else None
+            ),
             "computer_name": self.computer_name,
             "windows_user": self.windows_user,
             "format": self.image_format,
@@ -359,13 +415,18 @@ class Activity(Base):
     employee = relationship("Employee", back_populates="activities")
 
     def to_dict(self):
+        """转换为字典"""
+        from server_timezone import format_beijing_time
+
         return {
             "id": self.id,
             "employee_id": self.employee_id,
             "action": self.action,
             "details": self.details,
             "ip_address": self.ip_address,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_at": (
+                format_beijing_time(self.created_at) if self.created_at else None
+            ),
         }
 
 
