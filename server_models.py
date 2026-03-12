@@ -85,22 +85,28 @@ class Employee(Base):
 
     @property
     def today_screenshots(self):
-        """今日截图数量"""
+        """今日截图数量 - 修复版"""
         from server_timezone import get_utc_now, make_naive
 
-        now_utc = get_utc_now()
+        now_utc = get_utc_now()  # aware
         today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = today_start + timedelta(days=1)
 
-        # 转换为 naive 用于数据库查询
+        # 转换为 naive
         today_start_naive = make_naive(today_start)
         today_end_naive = make_naive(today_end)
 
-        return sum(
-            1
-            for s in self.screenshots
-            if today_start_naive <= s.screenshot_time < today_end_naive
-        )
+        count = 0
+        for s in self.screenshots:
+            # 确保 screenshot_time 也是 naive
+            shot_time = s.screenshot_time
+            if shot_time.tzinfo is not None:
+                shot_time = shot_time.replace(tzinfo=None)
+
+            if today_start_naive <= shot_time < today_end_naive:
+                count += 1
+
+        return count
 
     @property
     def last_active(self):
@@ -113,7 +119,7 @@ class Employee(Base):
 
     @property
     def online_clients(self):
-        """在线客户端数量"""
+        """在线客户端数量 - 修复版"""
         from server_timezone import get_utc_now, make_naive
 
         now_naive = make_naive(get_utc_now())
@@ -121,7 +127,7 @@ class Employee(Base):
         count = 0
         for c in self.clients:
             if c.last_seen:
-                last_naive = c._get_naive_last_seen()
+                last_naive = make_naive(c.last_seen)
                 if (now_naive - last_naive) < timedelta(minutes=10):
                     count += 1
         return count
@@ -168,7 +174,7 @@ class Employee(Base):
 
     @property
     def has_active_clients(self):
-        """是否有活跃客户端（在线状态）"""
+        """是否有活跃客户端 - 修复版"""
         if not self.clients:
             return False
 
@@ -178,7 +184,7 @@ class Employee(Base):
 
         for client in self.clients:
             if client.last_seen:
-                last_naive = client._get_naive_last_seen()
+                last_naive = make_naive(client.last_seen)
                 if (now_naive - last_naive) < timedelta(minutes=10):
                     return True
         return False
