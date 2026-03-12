@@ -2099,16 +2099,16 @@ def get_stats(
 
     # ===== 使用工具函数获取北京时间 =====
     beijing_now = get_beijing_now()
-    today = beijing_now.date()
-    week_ago = beijing_now - timedelta(days=7)
 
-    # ===== 使用工具函数获取日期范围 =====
+    # 🚨 修复：直接使用datetime，不转换为date
     today_start, today_end = get_date_range_for_day(beijing_now)
 
-    # 昨日
-    yesterday = today - timedelta(days=1)
+    # 昨日 - 直接用datetime计算
+    yesterday = beijing_now - timedelta(days=1)
     yesterday_start, yesterday_end = get_date_range_for_day(yesterday)
-    # ====================================
+
+    # 本周开始（7天前）
+    week_ago = beijing_now - timedelta(days=7)
 
     # 今日截图
     today_count = (
@@ -2186,7 +2186,7 @@ def get_stats(
         .all()
     )
 
-    # 各员工截图统计（使用北京时间）
+    # 各员工截图统计
     top_employees = []
     employees = db.query(models.Employee).limit(5).all()
     for emp in employees:
