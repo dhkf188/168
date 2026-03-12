@@ -1682,66 +1682,92 @@ def get_screenshots(
             params["client_id"] = client_id
 
         # ==============================
-        # 3. 统一北京时间处理（保持不变）
+        # 3. 构建完整的时间字符串（北京时间）
         # ==============================
-        # 处理开始时间
+        full_start_datetime = None
+        full_end_datetime = None
+
+        # 处理开始时间 - 构建北京时间字符串
         if start_date and " " in start_date:
-            base_sql += " AND s.screenshot_time >= :start_datetime"
-            params["start_datetime"] = start_date
+            full_start_datetime = start_date
             logger.debug(f"开始时间(北京时间): {start_date}")
         elif start_date and start_time:
-            start_datetime = f"{start_date} {start_time}"
+            full_start_datetime = f"{start_date} {start_time}"
             if len(start_time) == 5:
-                start_datetime += ":00"
-            base_sql += " AND s.screenshot_time >= :start_datetime"
-            params["start_datetime"] = start_datetime
-            logger.debug(f"开始时间(北京时间): {start_datetime}")
+                full_start_datetime += ":00"
+            logger.debug(f"开始时间(北京时间): {full_start_datetime}")
         elif start_date:
-            start_datetime = f"{start_date} 00:00:00"
-            base_sql += " AND s.screenshot_time >= :start_datetime"
-            params["start_datetime"] = start_datetime
-            logger.debug(f"开始时间(北京时间): {start_datetime}")
+            full_start_datetime = f"{start_date} 00:00:00"
+            logger.debug(f"开始时间(北京时间): {full_start_datetime}")
         elif start_time:
             today = get_beijing_now().strftime("%Y-%m-%d")
-            start_datetime = f"{today} {start_time}"
+            full_start_datetime = f"{today} {start_time}"
             if len(start_time) == 5:
-                start_datetime += ":00"
-            base_sql += " AND s.screenshot_time >= :start_datetime"
-            params["start_datetime"] = start_datetime
-            logger.debug(f"开始时间(北京时间): {start_datetime}")
+                full_start_datetime += ":00"
+            logger.debug(f"开始时间(北京时间): {full_start_datetime}")
 
-        # 处理结束时间
+        # 处理结束时间 - 构建北京时间字符串
         if end_date and " " in end_date:
-            base_sql += " AND s.screenshot_time <= :end_datetime"
-            params["end_datetime"] = end_date
+            full_end_datetime = end_date
             logger.debug(f"结束时间(北京时间): {end_date}")
         elif end_date and end_time:
-            end_datetime = f"{end_date} {end_time}"
+            full_end_datetime = f"{end_date} {end_time}"
             if len(end_time) == 5:
-                end_datetime += ":59"
-            base_sql += " AND s.screenshot_time <= :end_datetime"
-            params["end_datetime"] = end_datetime
-            logger.debug(f"结束时间(北京时间): {end_datetime}")
+                full_end_datetime += ":59"
+            logger.debug(f"结束时间(北京时间): {full_end_datetime}")
         elif end_date:
-            end_datetime = f"{end_date} 23:59:59"
-            base_sql += " AND s.screenshot_time <= :end_datetime"
-            params["end_datetime"] = end_datetime
-            logger.debug(f"结束时间(北京时间): {end_datetime}")
+            full_end_datetime = f"{end_date} 23:59:59"
+            logger.debug(f"结束时间(北京时间): {full_end_datetime}")
         elif end_time:
             today = get_beijing_now().strftime("%Y-%m-%d")
-            end_datetime = f"{today} {end_time}"
+            full_end_datetime = f"{today} {end_time}"
             if len(end_time) == 5:
-                end_datetime += ":59"
-            base_sql += " AND s.screenshot_time <= :end_datetime"
-            params["end_datetime"] = end_datetime
-            logger.debug(f"结束时间(北京时间): {end_datetime}")
+                full_end_datetime += ":59"
+            logger.debug(f"结束时间(北京时间): {full_end_datetime}")
 
-        # 验证时间范围
+        # ==============================
+        # 3-1. 🚨 将北京时间转换为 UTC 用于数据库查询
+        # ==============================
+        from server_timezone import parse_beijing_datetime, to_utc_time, make_naive
+
+        # 转换开始时间
+        if full_start_datetime:
+            try:
+                # 解析北京时间
+                beijing_dt = parse_beijing_datetime(full_start_datetime)
+                if beijing_dt:
+                    # 转换为 UTC 并转为 naive
+                    utc_dt = to_utc_time(beijing_dt)
+                    utc_naive = make_naive(utc_dt)
+                    
+                    base_sql += " AND s.screenshot_time >= :start_datetime"
+                    params["start_datetime"] = utc_naive
+                    logger.debug(f"开始时间(UTC): {utc_naive}")
+            except Exception as e:
+                logger.error(f"开始时间转换失败: {e}")
+
+        # 转换结束时间
+        if full_end_datetime:
+            try:
+                # 解析北京时间
+                beijing_dt = parse_beijing_datetime(full_end_datetime)
+                if beijing_dt:
+                    # 转换为 UTC 并转为 naive
+                    utc_dt = to_utc_time(beijing_dt)
+                    utc_naive = make_naive(utc_dt)
+                    
+                    base_sql += " AND s.screenshot_time <= :end_datetime"
+                    params["end_datetime"] = utc_naive
+                    logger.debug(f"结束时间(UTC): {utc_naive}")
+            except Exception as e:
+                logger.error(f"结束时间转换失败: {e}")
+
+        # 验证时间范围（使用 UTC 时间比较）
         if params.get("start_datetime") and params.get("end_datetime"):
             if params["start_datetime"] > params["end_datetime"]:
                 raise HTTPException(status_code=400, detail="开始时间不能大于结束时间")
             logger.info(
-                f"时间范围: {params['start_datetime']} 至 {params['end_datetime']}"
+                f"时间范围(UTC): {params['start_datetime']} 至 {params['end_datetime']}"
             )
 
         # ==============================
@@ -2766,8 +2792,6 @@ def get_file_stats(
 
 
 # ==================== 辅助函数：统一格式化 ====================
-
-# ==================== 统一的截图格式化函数 ====================
 
 
 def format_screenshot_response(row_dict):
