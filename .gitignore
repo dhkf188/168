@@ -1,0 +1,99 @@
+# ========== 环境变量 ==========
+.env
+.env.local
+.env.production
+.env.development
+*.env
+
+# ========== 配置文件 ==========
+config.json                 # 客户端配置（包含client_id）
+ca.pem                      # SSL证书
+*.key                       # 私钥文件
+*.pem                       # 证书文件
+*.crt                       # 证书
+
+# ========== 日志文件 ==========
+*.log
+logs/
+monitor.log
+server.log
+access.log
+error.log
+
+# ========== 数据文件 ==========
+/data/
+screenshots/
+temp/
+backups/
+uploads/
+*.db
+*.sqlite
+*.sqlite3
+
+# ========== Python缓存 ==========
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+env.bak/
+venv.bak/
+pythonenv*/
+
+# ========== Python包 ==========
+*.egg-info/
+*.egg
+dist/
+build/
+pip-wheel-metadata/
+share/python-wheels/
+
+# ========== Node.js ==========
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ========== 前端构建 ==========
+/dist/
+/build/
+/public/dist/
+*.css.map
+*.js.map
+
+# ========== IDE/编辑器 ==========
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========== 测试覆盖率 ==========
+.coverage
+.coverage.*
+.cache
+coverage/
+*.cover
+*.py,cover
+.pytest_cache/
+
+# ========== Docker ==========
+.dockerignore
+docker-compose.override.yml
+
+# ========== 临时文件 ==========
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.old
+*.orig

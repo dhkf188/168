@@ -1,0 +1,87 @@
+services:
+  - type: web
+    name: employee-monitor
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: |
+      # 1. 安装 Python 依赖
+      pip install -r requirements.txt
+      echo "✅ Python 依赖安装完成"
+
+      # 2. 安装 Node.js
+      echo "📦 安装 Node.js..."
+      curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+      apt-get install -y nodejs
+      echo "Node version: $(node --version)"
+      echo "NPM version: $(npm --version)"
+      echo "✅ Node.js 安装完成"
+
+      # 3. 查看当前目录文件（调试用）
+      echo "📂 当前目录文件:"
+      ls -la
+
+      # 4. 安装前端依赖
+      echo "📦 安装前端依赖..."
+      npm install
+      echo "✅ 前端依赖安装完成"
+
+      # 5. 构建前端
+      echo "🔨 构建前端..."
+      npm run build
+      echo "✅ 前端构建完成"
+
+      # 6. 检查 dist 目录
+      echo "📂 检查 dist 目录:"
+      if [ -d "dist" ]; then
+        ls -la dist/
+        echo "✅ dist 目录存在"
+        
+        # 7. 复制文件到根目录（同一级！）
+        echo "📋 复制构建文件到根目录（同一级）..."
+        cp -r dist/* .
+        echo "✅ 文件复制完成"
+      else
+        echo "❌ dist 目录不存在！构建失败！"
+        exit 1
+      fi
+
+      # 8. 最终验证
+      echo "📂 根目录最终文件列表:"
+      ls -la | head -30
+      echo "✅ 构建完成！index.html 应该在根目录"
+    startCommand: |
+      chmod +x entrypoint.sh && ./entrypoint.sh
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 480
+      - key: SCREENSHOT_DIR
+        value: /data/screenshots
+      - key: SCREENSHOT_FORMAT
+        value: webp
+      - key: SCREENSHOT_QUALITY
+        value: 80
+      - key: SCREENSHOT_INTERVAL
+        value: 60
+      - key: AUTO_CLEANUP_ENABLED
+        value: true
+      - key: CLEANUP_INTERVAL
+        value: 21600
+      - key: SCREENSHOT_RETENTION_HOURS
+        value: 4
+      - key: CA_CERT_PATH
+        value: /etc/ssl/certs/ca-certificates.crt
+      - key: DEBUG
+        value: false
+    disk:
+      name: screenshots
+      mountPath: /data
+      sizeGB: 5

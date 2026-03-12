@@ -1,0 +1,21 @@
+{
+  "server_urls": [
+    "http://localhost:8000",
+    "https://your-server.onrender.com"
+  ],
+  "interval": 300,
+  "quality": 80,
+  "format": "webp",
+  "client_id": "ffea1615-1341-437e-b26e-011116ccdb94",
+  "employee_id": "梁珂\\LiangKe",
+  "auto_start": true,
+  "hide_window": true,
+  "enable_heartbeat": true,
+  "enable_batch_upload": true,
+  "max_history": 10,
+  "similarity_threshold": 0.95,
+  "retry_times": 3,
+  "retry_delay": 1,
+  "encryption_enabled": false,
+  "last_update": "2026-03-09T16:18:29.075670"
+}
