@@ -446,15 +446,12 @@ const loadScreenshots = async () => {
       params.client_id = filters.value.clientId;
     }
 
-    // ===== 时间筛选处理（保持不变）=====
+    // ===== 时间筛选处理（方案1-完整版）=====
     if (filters.value.start_date && filters.value.end_date) {
+      // 时间滑块设置的完整日期时间
       params.start_date = filters.value.start_date;
       params.end_date = filters.value.end_date;
-      console.log(
-        "使用时间滑块日期(北京时间):",
-        params.start_date,
-        params.end_date,
-      );
+      console.log("使用时间滑块日期:", params.start_date, params.end_date);
     } else if (
       filters.value.dateRange &&
       filters.value.dateRange.length === 2
@@ -473,11 +470,13 @@ const loadScreenshots = async () => {
       } else {
         params.end_date = `${endDate} 23:59:59`;
       }
-      console.log(
-        "使用日期时间筛选(北京时间):",
-        params.start_date,
-        params.end_date,
-      );
+      console.log("使用日期时间筛选:", params.start_date, params.end_date);
+    } else if (filters.value.startTime && filters.value.endTime) {
+      // 只有时间时，使用今天日期
+      const today = new Date().toISOString().split("T")[0];
+      params.start_date = `${today} ${filters.value.startTime}:00`;
+      params.end_date = `${today} ${filters.value.endTime}:59`;
+      console.log("使用时间筛选(今天):", params.start_date, params.end_date);
     } else {
       if (filters.value.startTime) {
         params.start_time = filters.value.startTime;
