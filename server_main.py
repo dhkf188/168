@@ -40,6 +40,8 @@ from sqlalchemy import func, and_, or_
 from pydantic import BaseModel
 from sqlalchemy import exists, and_, or_, select
 from sqlalchemy.orm import selectinload
+import mimetypes
+from pathlib import Path
 
 import server_models as models
 import server_schemas as schemas
@@ -103,6 +105,20 @@ THUMBNAIL_PATH = STORAGE_PATH / "thumbnails"
 THUMBNAIL_PATH.mkdir(parents=True, exist_ok=True)
 logger.info(f"✅ 缩略图存储路径: {THUMBNAIL_PATH.absolute()}")
 
+# ========== 截图服务配置 ==========
+# 所有可能的根路径（按优先级排序）
+ROOT_PATHS = [
+    STORAGE_PATH,  # 主存储路径
+    Path("/data/screenshots"),  # 数据卷路径
+    Path("/app/screenshots"),  # Render 应用目录
+    Path.cwd() / "screenshots",  # 当前目录
+    Path("/var/lib/screenshots"),  # 常见数据目录
+    Path("/tmp/screenshots"),  # 临时目录
+    Path("/opt/render/project/src/screenshots"),  # Render 默认路径
+]
+FILE_CACHE = {}
+MAX_CACHE_SIZE = 1000
+
 # 列出一些文件用于调试
 try:
     files = list(STORAGE_PATH.glob("**/*.webp"))[:5]
@@ -123,6 +139,113 @@ async def startup_event():
     logger.info("=" * 50)
     logger.info("🚀 员工监控系统服务器启动")
     logger.info("=" * 50)
+
+    # ===== 🚨 新增：自动迁移旧截图目录 =====
+    try:
+        import shutil
+        from pathlib import Path
+
+        # 目标路径（当前配置的路径）
+        target_path = STORAGE_PATH.absolute()
+        logger.info(f"📁 目标存储路径: {target_path}")
+
+        # 确保目标路径存在
+        target_path.mkdir(parents=True, exist_ok=True)
+
+        # 所有可能的旧路径
+        possible_old_paths = [
+            Path("./screenshots").absolute(),  # 当前目录下的 screenshots
+            Path("/app/screenshots").absolute(),  # Render 应用目录
+            Path("/var/lib/screenshots").absolute(),  # 常见数据目录
+            Path("/tmp/screenshots").absolute(),  # 临时目录
+            Path.cwd() / "screenshots",  # 工作目录下的 screenshots
+            Path("/opt/render/project/src/screenshots"),  # Render 默认路径
+        ]
+
+        # 去重并过滤掉目标路径
+        unique_old_paths = []
+        seen = set()
+        for p in possible_old_paths:
+            p_str = str(p)
+            if p_str not in seen and p != target_path:
+                seen.add(p_str)
+                unique_old_paths.append(p)
+
+        logger.info("📁 检查是否需要迁移旧截图目录...")
+
+        total_migrated = 0
+        total_files = 0
+        total_size = 0
+
+        for old_path in unique_old_paths:
+            if old_path.exists() and old_path.is_dir():
+                logger.info(f"   发现旧目录: {old_path}")
+
+                # 统计旧目录中的截图文件
+                webp_files = list(old_path.glob("**/*.webp"))
+                jpg_files = list(old_path.glob("**/*.jpg"))
+                png_files = list(old_path.glob("**/*.png"))
+
+                all_files = webp_files + jpg_files + png_files
+
+                if all_files:
+                    file_count = len(all_files)
+                    dir_size = sum(f.stat().st_size for f in all_files if f.is_file())
+
+                    logger.info(
+                        f"     找到 {file_count} 个截图文件，总大小: {dir_size/1024/1024:.2f} MB"
+                    )
+
+                    # 迁移每个文件
+                    for file_path in all_files:
+                        try:
+                            # 计算相对路径
+                            rel_path = file_path.relative_to(old_path)
+                            target_file = target_path / rel_path
+
+                            # 确保目标目录存在
+                            target_file.parent.mkdir(parents=True, exist_ok=True)
+
+                            # 如果目标文件已存在，跳过
+                            if target_file.exists():
+                                logger.debug(f"     文件已存在，跳过: {rel_path}")
+                                continue
+
+                            # 移动文件
+                            shutil.move(str(file_path), str(target_file))
+                            total_files += 1
+                            total_size += file_path.stat().st_size
+
+                            logger.debug(f"     已迁移: {rel_path}")
+
+                        except Exception as e:
+                            logger.error(f"     迁移文件失败 {file_path}: {e}")
+
+                    total_migrated += 1
+
+                    # 尝试删除空目录
+                    try:
+                        # 检查目录是否为空
+                        remaining = list(old_path.rglob("*"))
+                        if not remaining:
+                            old_path.rmdir()
+                            logger.info(f"     已删除空目录: {old_path}")
+                    except Exception as e:
+                        logger.debug(f"     无法删除目录 {old_path}: {e}")
+
+        if total_migrated > 0:
+            logger.info(f"✅ 迁移完成！")
+            logger.info(f"   迁移了 {total_migrated} 个旧目录")
+            logger.info(
+                f"   共 {total_files} 个文件，总大小: {total_size/1024/1024:.2f} MB"
+            )
+            logger.info(f"   所有文件已移至: {target_path}")
+        else:
+            logger.info("未找到需要迁移的旧截图目录")
+
+    except Exception as e:
+        logger.error(f"❌ 截图目录迁移失败: {e}", exc_info=True)
+        # 迁移失败不影响服务启动
 
     # ===== 1. 数据库信息 =====
     logger.info("📊 数据库配置:")
@@ -1739,7 +1862,7 @@ def get_screenshots(
                     # 转换为 UTC 并转为 naive
                     utc_dt = to_utc_time(beijing_dt)
                     utc_naive = make_naive(utc_dt)
-                    
+
                     base_sql += " AND s.screenshot_time >= :start_datetime"
                     params["start_datetime"] = utc_naive
                     logger.debug(f"开始时间(UTC): {utc_naive}")
@@ -1755,7 +1878,7 @@ def get_screenshots(
                     # 转换为 UTC 并转为 naive
                     utc_dt = to_utc_time(beijing_dt)
                     utc_naive = make_naive(utc_dt)
-                    
+
                     base_sql += " AND s.screenshot_time <= :end_datetime"
                     params["end_datetime"] = utc_naive
                     logger.debug(f"结束时间(UTC): {utc_naive}")
@@ -2457,57 +2580,103 @@ def get_cleanup_status(
 
 @app.get("/screenshots/{path:path}", tags=["文件"])
 async def serve_screenshot(path: str):
-    """提供截图文件（增强日志）"""
+    """终极截图服务 - 带缓存和多路径支持"""
 
-    logger.info(f"📸 文件请求: {path}")
-
+    # ========= 1. 参数验证 =========
     if not path or path.strip() == "":
-        logger.warning("文件路径为空")
         raise HTTPException(status_code=404, detail="File not specified")
 
+    # 防止路径遍历攻击
+    if ".." in path or path.startswith("/"):
+        logger.warning(f"非法路径尝试: {path}")
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    # 统一路径分隔符
+    path = path.replace("\\", "/")
+    logger.debug(f"📸 文件请求: {path}")
+
     try:
-        # 统一路径分隔符
-        path = path.replace("\\", "/")
-        logger.debug(f"清理后的路径: {path}")
-
-        # 主存储路径
-        base_path = STORAGE_PATH.resolve()
-        file_path = (base_path / path).resolve()
-
-        logger.debug(f"尝试路径: {file_path}")
-        logger.debug(f"文件存在: {file_path.exists()}")
-
-        if file_path.exists():
-            if file_path.is_file():
-                size = file_path.stat().st_size
-                logger.info(f"✅ 文件找到: {path} ({size} bytes)")
-                return FileResponse(file_path)
+        # ========= 2. 缓存命中 =========
+        cached = FILE_CACHE.get(path)
+        if cached:
+            if cached.exists() and cached.is_file():
+                media_type, _ = mimetypes.guess_type(str(cached))
+                logger.debug(f"✅ 缓存命中: {path}")
+                return FileResponse(
+                    cached,
+                    media_type=media_type or "application/octet-stream",
+                    headers={"Cache-Control": "public, max-age=31536000"},
+                )
             else:
-                logger.warning(f"路径存在但不是文件: {path}")
-        else:
-            logger.debug(f"文件不存在: {path}")
+                # 缓存的文件已不存在，删除缓存
+                FILE_CACHE.pop(path, None)
+                logger.debug(f"缓存文件已不存在: {path}")
 
-            # 列出父目录内容（调试用）
-            parent_dir = file_path.parent
-            if parent_dir.exists():
-                files = list(parent_dir.glob("*"))[:10]
-                logger.debug(f"父目录 {parent_dir} 中的文件: {[f.name for f in files]}")
+        # ========= 3. 查找文件 =========
+        found_path = None
+        for root in ROOT_PATHS:
+            try:
+                full_path = (root / path).resolve()
 
-        # 备用路径
-        backup_base = Path("/data/screenshots").resolve()
-        backup_file = (backup_base / path).resolve()
+                # 安全检查：确保文件路径在根路径内
+                if not str(full_path).startswith(str(root)):
+                    logger.debug(f"路径越界: {full_path} 不在 {root} 内")
+                    continue
 
-        if str(backup_file).startswith(str(backup_base)) and backup_file.exists():
-            logger.info(f"✅ 在备用路径找到文件: {backup_file}")
-            return FileResponse(backup_file)
+                if full_path.exists() and full_path.is_file():
+                    found_path = full_path
+                    logger.info(f"✅ 找到截图: {path} 在 {root}")
+                    break
 
-        logger.warning(f"❌ 文件不存在: {path}")
+            except PermissionError:
+                logger.debug(f"无权限访问: {root}")
+                continue
+            except Exception as e:
+                logger.debug(f"查找路径 {root} 时出错: {e}")
+                continue
+
+        if found_path:
+            # 写入缓存
+            FILE_CACHE[path] = found_path
+
+            # 限制缓存大小（防止内存溢出）
+            if len(FILE_CACHE) > 1000:
+                # 删除最旧的缓存项
+                oldest_key = next(iter(FILE_CACHE))
+                FILE_CACHE.pop(oldest_key, None)
+
+            media_type, _ = mimetypes.guess_type(str(found_path))
+
+            return FileResponse(
+                found_path,
+                media_type=media_type or "application/octet-stream",
+                headers={"Cache-Control": "public, max-age=31536000"},
+            )
+
+        # ========= 4. 未找到 - 详细调试信息 =========
+        logger.warning(f"❌ 截图不存在: {path}")
+
+        # 尝试列出父目录内容帮助调试
+        for root in ROOT_PATHS[:3]:  # 只检查前3个
+            try:
+                parent_dir = root / Path(path).parent
+                if parent_dir.exists() and parent_dir.is_dir():
+                    files = list(parent_dir.glob("*"))[:10]
+                    if files:
+                        logger.info(f"目录 {parent_dir} 中的文件 (前10个):")
+                        for f in files:
+                            file_type = "📁" if f.is_dir() else "📄"
+                            size = f.stat().st_size if f.is_file() else 0
+                            logger.info(f"   {file_type} {f.name} ({size} bytes)")
+            except Exception:
+                continue
+
         raise HTTPException(status_code=404, detail="File not found")
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"文件访问错误: {e}", exc_info=True)
+        logger.error(f"截图服务错误: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Server error")
 
 
