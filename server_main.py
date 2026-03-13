@@ -452,24 +452,29 @@ async def startup_event():
     try:
         db = next(get_db())
         from server_database import fix_screenshot_urls
+
         fixed = fix_screenshot_urls(db)
         if fixed > 0:
             logger.info(f"✅ 已修复 {fixed} 个截图的URL格式")
         db.close()
     except Exception as e:
         logger.error(f"修复截图URL失败: {e}")
-    
+
     # ===== ⭐ 新增：验证StaticFiles =====
     logger.info("=" * 50)
     logger.info("🔍 验证StaticFiles可访问性:")
-    
+
     try:
         db = next(get_db())
         # 获取第100页的截图（只是为了测试）
-        test_screenshots = db.query(models.Screenshot).order_by(
-            models.Screenshot.screenshot_time.desc()
-        ).offset(100 * 24).limit(3).all()
-        
+        test_screenshots = (
+            db.query(models.Screenshot)
+            .order_by(models.Screenshot.screenshot_time.desc())
+            .offset(100 * 24)
+            .limit(3)
+            .all()
+        )
+
         if test_screenshots:
             logger.info(f"找到 {len(test_screenshots)} 个第100页后的截图:")
             for ss in test_screenshots:
@@ -481,11 +486,11 @@ async def startup_event():
                 logger.info(f"    URL: {ss.storage_url}")
         else:
             logger.info("没有第100页后的截图数据")
-        
+
         db.close()
     except Exception as e:
         logger.error(f"验证失败: {e}")
-    
+
     logger.info("=" * 50)
 
     logger.info("=" * 50)
@@ -1009,7 +1014,7 @@ async def register_client(
 
     if client_info.computer_name and client_info.windows_user:
         base_id = f"{client_info.computer_name}\\{client_info.windows_user}"
-        employee_id = f"{base_id}_{unique_suffix}"
+        employee_id = base_id
     elif client_info.computer_name:
         employee_id = f"{client_info.computer_name}_{unique_suffix}"
     else:
@@ -3229,6 +3234,181 @@ def fix_screenshot_urls(db_session):
         logger.info(f"✅ 已修复 {fixed_count} 个截图的URL")
 
     return fixed_count
+
+
+# server_main.py - 在文件末尾添加
+
+
+@app.post("/api/debug/unify-paths", tags=["调试"])
+def unify_paths(db: Session = Depends(get_db)):
+    """
+    统一所有路径格式 - 全面修复
+    功能：
+    1. 检查所有员工ID格式
+    2. 修复截图文件名中的路径
+    3. 确保数据库记录与实际文件一致
+    """
+    from pathlib import Path
+    import shutil
+
+    logger.info("=" * 50)
+    logger.info("🔧 开始统一路径修复")
+    logger.info("=" * 50)
+
+    result = {
+        "employees_checked": 0,
+        "employees_fixed": 0,
+        "screenshots_checked": 0,
+        "screenshots_fixed": 0,
+        "files_moved": 0,
+        "errors": [],
+    }
+
+    try:
+        # ===== 1. 检查并修复员工ID =====
+        logger.info("📋 检查员工ID格式...")
+        employees = db.query(models.Employee).all()
+        result["employees_checked"] = len(employees)
+
+        for emp in employees:
+            old_id = emp.employee_id
+
+            # 如果ID包含8位UUID后缀
+            if "_" in old_id and len(old_id.split("_")[-1]) == 8:
+                # 生成不带后缀的新ID
+                new_id = "_".join(old_id.split("_")[:-1])
+
+                # 检查新ID是否已存在
+                existing = (
+                    db.query(models.Employee)
+                    .filter(models.Employee.employee_id == new_id)
+                    .first()
+                )
+
+                if not existing:
+                    logger.info(f"修复员工ID: {old_id} -> {new_id}")
+
+                    # 更新员工表
+                    emp.employee_id = new_id
+
+                    # 更新关联的截图
+                    for ss in emp.screenshots:
+                        if ss.filename:
+                            old_filename = ss.filename
+                            new_filename = old_filename.replace(old_id, new_id)
+                            ss.filename = new_filename
+                            ss.storage_url = f"/screenshots/{new_filename}"
+
+                            # 尝试移动实际文件
+                            old_path = STORAGE_PATH / old_filename
+                            new_path = STORAGE_PATH / new_filename
+                            if old_path.exists() and not new_path.exists():
+                                new_path.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.move(str(old_path), str(new_path))
+                                result["files_moved"] += 1
+                                logger.debug(
+                                    f"移动文件: {old_filename} -> {new_filename}"
+                                )
+
+                    # 更新关联的客户端
+                    for client in emp.clients:
+                        client.employee_id = new_id
+
+                    result["employees_fixed"] += 1
+
+        # ===== 2. 检查并修复截图路径 =====
+        logger.info("📋 检查截图路径...")
+        screenshots = db.query(models.Screenshot).all()
+        result["screenshots_checked"] = len(screenshots)
+
+        for ss in screenshots:
+            if not ss.filename:
+                continue
+
+            # 检查文件是否存在
+            file_path = STORAGE_PATH / ss.filename
+
+            if not file_path.exists():
+                logger.debug(f"文件不存在: {ss.filename}")
+
+                # 尝试查找可能的文件
+                parent_dir = file_path.parent
+                if parent_dir.exists():
+                    # 查找文件名相似的图片
+                    possible_files = list(parent_dir.glob("*.webp")) + list(
+                        parent_dir.glob("*.jpg")
+                    )
+
+                    if possible_files:
+                        # 使用找到的第一个文件
+                        found_file = possible_files[0]
+                        rel_path = found_file.relative_to(STORAGE_PATH)
+
+                        logger.info(f"修复截图 {ss.id}: {ss.filename} -> {rel_path}")
+
+                        ss.filename = str(rel_path)
+                        ss.storage_url = f"/screenshots/{rel_path}"
+                        result["screenshots_fixed"] += 1
+
+                        # 如果文件名包含 _thumb，但找到的文件没有，更新缩略图字段
+                        if "_thumb" in str(rel_path):
+                            ss.thumbnail = str(rel_path)
+                    else:
+                        # 尝试在上级目录查找
+                        for root in [STORAGE_PATH, STORAGE_PATH / "thumbnails"]:
+                            if root.exists():
+                                all_files = list(root.rglob("*.webp"))
+                                # 根据截图时间匹配
+                                if ss.screenshot_time:
+                                    time_str = ss.screenshot_time.strftime("%H-%M-%S")
+                                    matching = [
+                                        f for f in all_files if time_str in f.name
+                                    ]
+                                    if matching:
+                                        rel_path = matching[0].relative_to(STORAGE_PATH)
+                                        ss.filename = str(rel_path)
+                                        ss.storage_url = f"/screenshots/{rel_path}"
+                                        result["screenshots_fixed"] += 1
+                                        break
+
+        # ===== 3. 检查缩略图 =====
+        logger.info("📋 检查缩略图...")
+        thumb_count = 0
+        for ss in screenshots:
+            if ss.thumbnail:
+                thumb_path = STORAGE_PATH / ss.thumbnail
+                if not thumb_path.exists() and ss.filename:
+                    # 尝试生成缩略图路径
+                    base = ss.filename.rsplit(".", 1)[0]
+                    possible_thumb = f"{base}_thumb.webp"
+                    if (STORAGE_PATH / possible_thumb).exists():
+                        ss.thumbnail = possible_thumb
+                        thumb_count += 1
+
+        if thumb_count > 0:
+            logger.info(f"修复 {thumb_count} 个缩略图路径")
+
+        # ===== 4. 提交所有更改 =====
+        if result["employees_fixed"] > 0 or result["screenshots_fixed"] > 0:
+            db.commit()
+            logger.info(f"✅ 已提交所有更改到数据库")
+
+        # ===== 5. 统计结果 =====
+        logger.info("=" * 50)
+        logger.info("📊 修复结果统计:")
+        logger.info(f"   - 检查员工: {result['employees_checked']}")
+        logger.info(f"   - 修复员工: {result['employees_fixed']}")
+        logger.info(f"   - 检查截图: {result['screenshots_checked']}")
+        logger.info(f"   - 修复截图: {result['screenshots_fixed']}")
+        logger.info(f"   - 移动文件: {result['files_moved']}")
+        logger.info("=" * 50)
+
+    except Exception as e:
+        logger.error(f"修复过程中出错: {e}", exc_info=True)
+        result["errors"].append(str(e))
+        db.rollback()
+
+    return result
 
 
 if __name__ == "__main__":
