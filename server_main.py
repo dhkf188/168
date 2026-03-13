@@ -448,18 +448,6 @@ async def startup_event():
             value = "已设置(隐藏)"
         logger.info(f"   - {env}: {value}")
 
-    # ===== ⭐ 新增：修复截图URL =====
-    try:
-        db = next(get_db())
-        from server_database import fix_screenshot_urls
-
-        fixed = fix_screenshot_urls(db)
-        if fixed > 0:
-            logger.info(f"✅ 已修复 {fixed} 个截图的URL格式")
-        db.close()
-    except Exception as e:
-        logger.error(f"修复截图URL失败: {e}")
-
     # ===== ⭐ 新增：验证StaticFiles =====
     logger.info("=" * 50)
     logger.info("🔍 验证StaticFiles可访问性:")
@@ -3237,6 +3225,8 @@ def fix_screenshot_urls(db_session):
 
 
 # server_main.py - 在文件末尾添加
+
+from fastapi import Depends
 
 
 @app.post("/api/debug/unify-paths", tags=["调试"])
