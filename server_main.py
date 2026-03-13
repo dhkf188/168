@@ -140,29 +140,26 @@ async def startup_event():
     logger.info("🚀 员工监控系统服务器启动")
     logger.info("=" * 50)
 
-    # ===== 🚨 新增：自动迁移旧截图目录 =====
+    # ===== 🚨 自动迁移旧截图目录（优化版） =====
     try:
         import shutil
         from pathlib import Path
 
-        # 目标路径（当前配置的路径）
         target_path = STORAGE_PATH.absolute()
         logger.info(f"📁 目标存储路径: {target_path}")
-
-        # 确保目标路径存在
         target_path.mkdir(parents=True, exist_ok=True)
 
         # 所有可能的旧路径
         possible_old_paths = [
-            Path("./screenshots").absolute(),  # 当前目录下的 screenshots
-            Path("/app/screenshots").absolute(),  # Render 应用目录
-            Path("/var/lib/screenshots").absolute(),  # 常见数据目录
-            Path("/tmp/screenshots").absolute(),  # 临时目录
-            Path.cwd() / "screenshots",  # 工作目录下的 screenshots
-            Path("/opt/render/project/src/screenshots"),  # Render 默认路径
+            Path("./screenshots").absolute(),
+            Path("/app/screenshots").absolute(),
+            Path("/var/lib/screenshots").absolute(),
+            Path("/tmp/screenshots").absolute(),
+            Path.cwd() / "screenshots",
+            Path("/opt/render/project/src/screenshots"),
         ]
 
-        # 去重并过滤掉目标路径
+        # 去重并过滤
         unique_old_paths = []
         seen = set()
         for p in possible_old_paths:
@@ -181,16 +178,15 @@ async def startup_event():
             if old_path.exists() and old_path.is_dir():
                 logger.info(f"   发现旧目录: {old_path}")
 
-                # 统计旧目录中的截图文件
-                webp_files = list(old_path.glob("**/*.webp"))
-                jpg_files = list(old_path.glob("**/*.jpg"))
-                png_files = list(old_path.glob("**/*.png"))
-
-                all_files = webp_files + jpg_files + png_files
+                # 优化：只扫描一次获取所有图片文件
+                all_files = []
+                for f in old_path.rglob("*"):
+                    if f.is_file() and f.suffix.lower() in [".webp", ".jpg", ".png"]:
+                        all_files.append(f)
 
                 if all_files:
                     file_count = len(all_files)
-                    dir_size = sum(f.stat().st_size for f in all_files if f.is_file())
+                    dir_size = sum(f.stat().st_size for f in all_files)
 
                     logger.info(
                         f"     找到 {file_count} 个截图文件，总大小: {dir_size/1024/1024:.2f} MB"
@@ -199,35 +195,33 @@ async def startup_event():
                     # 迁移每个文件
                     for file_path in all_files:
                         try:
-                            # 计算相对路径
                             rel_path = file_path.relative_to(old_path)
                             target_file = target_path / rel_path
 
-                            # 确保目标目录存在
                             target_file.parent.mkdir(parents=True, exist_ok=True)
 
-                            # 如果目标文件已存在，跳过
                             if target_file.exists():
                                 logger.debug(f"     文件已存在，跳过: {rel_path}")
                                 continue
 
-                            # 移动文件
+                            # 先获取大小再移动
+                            file_size = file_path.stat().st_size
                             shutil.move(str(file_path), str(target_file))
-                            total_files += 1
-                            total_size += file_path.stat().st_size
 
-                            logger.debug(f"     已迁移: {rel_path}")
+                            total_files += 1
+                            total_size += file_size
+                            logger.debug(
+                                f"     已迁移: {rel_path} ({file_size/1024:.1f}KB)"
+                            )
 
                         except Exception as e:
                             logger.error(f"     迁移文件失败 {file_path}: {e}")
 
                     total_migrated += 1
 
-                    # 尝试删除空目录
+                    # 优化：快速检查目录是否为空
                     try:
-                        # 检查目录是否为空
-                        remaining = list(old_path.rglob("*"))
-                        if not remaining:
+                        if not any(old_path.iterdir()):
                             old_path.rmdir()
                             logger.info(f"     已删除空目录: {old_path}")
                     except Exception as e:
@@ -245,11 +239,9 @@ async def startup_event():
 
     except Exception as e:
         logger.error(f"❌ 截图目录迁移失败: {e}", exc_info=True)
-        # 迁移失败不影响服务启动
 
     # ===== 1. 数据库信息 =====
     logger.info("📊 数据库配置:")
-    # 隐藏密码，只显示连接信息
     db_url_display = Config.PRIMARY_DATABASE_URL
     if "@" in db_url_display:
         parts = db_url_display.split("@")
@@ -270,7 +262,7 @@ async def startup_event():
     asyncio.create_task(cleanup.start_cleanup_task())
     logger.info("✅ 清理任务已启动")
 
-    # ===== 3. 文件系统检查 =====
+    # ===== 3. 文件系统检查（优化版） =====
     logger.info("=" * 50)
     logger.info("📁 文件系统检查:")
 
@@ -288,17 +280,27 @@ async def startup_event():
         except Exception as e:
             logger.error(f"   ❌ 存储路径不可写: {e}")
 
-        # 统计文件
+        # 优化：只统计图片文件
         try:
-            webp_files = list(STORAGE_PATH.glob("**/*.webp"))
-            jpg_files = list(STORAGE_PATH.glob("**/*.jpg"))
-            png_files = list(STORAGE_PATH.glob("**/*.png"))
+            webp_files = []
+            jpg_files = []
+            png_files = []
+            total_size = 0
+
+            for f in STORAGE_PATH.rglob("*"):
+                if f.is_file():
+                    suffix = f.suffix.lower()
+                    if suffix == ".webp":
+                        webp_files.append(f)
+                        total_size += f.stat().st_size
+                    elif suffix == ".jpg":
+                        jpg_files.append(f)
+                        total_size += f.stat().st_size
+                    elif suffix == ".png":
+                        png_files.append(f)
+                        total_size += f.stat().st_size
 
             total_files = len(webp_files) + len(jpg_files) + len(png_files)
-            total_size = 0
-            for f in STORAGE_PATH.glob("**/*.*"):
-                if f.is_file():
-                    total_size += f.stat().st_size
 
             logger.info(f"   📊 文件统计:")
             logger.info(f"      - 总文件数: {total_files} 个")
@@ -335,7 +337,11 @@ async def startup_event():
     # 3.2 检查缩略图目录
     logger.info(f"   缩略图路径: {THUMBNAIL_PATH}")
     if THUMBNAIL_PATH.exists():
-        thumb_files = list(THUMBNAIL_PATH.glob("**/*.webp"))
+        # 优化：只统计图片文件
+        thumb_files = []
+        for f in THUMBNAIL_PATH.rglob("*"):
+            if f.is_file() and f.suffix.lower() == ".webp":
+                thumb_files.append(f)
         logger.info(f"   ✅ 缩略图目录存在 ({len(thumb_files)} 个文件)")
     else:
         logger.info(f"   ⚠️ 缩略图目录不存在，将自动创建")
@@ -345,7 +351,7 @@ async def startup_event():
         except Exception as e:
             logger.error(f"   ❌ 创建缩略图目录失败: {e}")
 
-    # 3.3 检查磁盘空间
+    # 3.3 检查磁盘空间（保持不变）
     try:
         import shutil
 
@@ -366,11 +372,16 @@ async def startup_event():
     except Exception as e:
         logger.error(f"   ❌ 检查磁盘空间失败: {e}")
 
-    # ===== 4. 创建默认管理员 =====
+    # ===== 4. 创建默认管理员（修复 Session 问题） =====
     logger.info("=" * 50)
     logger.info("👤 管理员账户检查:")
+
+    # ✅ 修复：使用 get_db 但确保正确关闭
+    db = None
     try:
+        # 使用原有的 get_db 生成器
         db = next(get_db())
+
         admin = (
             db.query(models.User)
             .filter(models.User.username == Config.ADMIN_USERNAME)
@@ -394,17 +405,20 @@ async def startup_event():
         user_count = db.query(models.User).count()
         logger.info(f"   👥 系统用户数: {user_count}")
 
-        db.close()
     except Exception as e:
         logger.error(f"   ❌ 管理员检查失败: {e}")
+    finally:
+        if db:
+            db.close()
 
-    # ===== 5. 数据库表统计 =====
+    # ===== 5. 数据库表统计（修复 Session 问题） =====
     logger.info("=" * 50)
     logger.info("📊 数据库统计:")
+
+    db = None
     try:
         db = next(get_db())
 
-        # 统计各表记录数
         screenshot_count = db.query(models.Screenshot).count()
         employee_count = db.query(models.Employee).count()
         client_count = db.query(models.Client).count()
@@ -415,7 +429,6 @@ async def startup_event():
         logger.info(f"   💻 客户端数: {client_count}")
         logger.info(f"   📝 活动日志: {activity_count}")
 
-        # 检查最近的活动
         if activity_count > 0:
             latest_activity = (
                 db.query(models.Activity)
@@ -426,9 +439,11 @@ async def startup_event():
                 f"   ⏱️ 最近活动: {latest_activity.action} ({latest_activity.created_at})"
             )
 
-        db.close()
     except Exception as e:
         logger.error(f"   ❌ 数据库统计失败: {e}")
+    finally:
+        if db:
+            db.close()
 
     # ===== 6. 环境信息 =====
     logger.info("=" * 50)
