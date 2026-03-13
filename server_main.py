@@ -105,19 +105,6 @@ THUMBNAIL_PATH = STORAGE_PATH / "thumbnails"
 THUMBNAIL_PATH.mkdir(parents=True, exist_ok=True)
 logger.info(f"✅ 缩略图存储路径: {THUMBNAIL_PATH.absolute()}")
 
-# ========== 截图服务配置 ==========
-# 所有可能的根路径（按优先级排序）
-ROOT_PATHS = [
-    STORAGE_PATH,  # 主存储路径
-    Path("/data/screenshots"),  # 数据卷路径
-    Path("/app/screenshots"),  # Render 应用目录
-    Path.cwd() / "screenshots",  # 当前目录
-    Path("/var/lib/screenshots"),  # 常见数据目录
-    Path("/tmp/screenshots"),  # 临时目录
-    Path("/opt/render/project/src/screenshots"),  # Render 默认路径
-]
-FILE_CACHE = {}
-MAX_CACHE_SIZE = 1000
 
 # 列出一些文件用于调试
 try:
@@ -460,6 +447,46 @@ async def startup_event():
         if env == "SECRET_KEY" and value != "未设置":
             value = "已设置(隐藏)"
         logger.info(f"   - {env}: {value}")
+
+    # ===== ⭐ 新增：修复截图URL =====
+    try:
+        db = next(get_db())
+        from server_database import fix_screenshot_urls
+        fixed = fix_screenshot_urls(db)
+        if fixed > 0:
+            logger.info(f"✅ 已修复 {fixed} 个截图的URL格式")
+        db.close()
+    except Exception as e:
+        logger.error(f"修复截图URL失败: {e}")
+    
+    # ===== ⭐ 新增：验证StaticFiles =====
+    logger.info("=" * 50)
+    logger.info("🔍 验证StaticFiles可访问性:")
+    
+    try:
+        db = next(get_db())
+        # 获取第100页的截图（只是为了测试）
+        test_screenshots = db.query(models.Screenshot).order_by(
+            models.Screenshot.screenshot_time.desc()
+        ).offset(100 * 24).limit(3).all()
+        
+        if test_screenshots:
+            logger.info(f"找到 {len(test_screenshots)} 个第100页后的截图:")
+            for ss in test_screenshots:
+                file_path = screenshots_path / ss.filename
+                logger.info(f"  - ID: {ss.id}")
+                logger.info(f"    时间: {ss.screenshot_time}")
+                logger.info(f"    文件: {file_path}")
+                logger.info(f"    存在: {file_path.exists()}")
+                logger.info(f"    URL: {ss.storage_url}")
+        else:
+            logger.info("没有第100页后的截图数据")
+        
+        db.close()
+    except Exception as e:
+        logger.error(f"验证失败: {e}")
+    
+    logger.info("=" * 50)
 
     logger.info("=" * 50)
     logger.info("✅ 服务器启动完成!")
@@ -2590,111 +2617,6 @@ def get_cleanup_status(
         }
 
 
-# ==================== 文件服务 ====================
-
-
-@app.get("/screenshots/{path:path}", tags=["文件"])
-async def serve_screenshot(path: str):
-    """终极截图服务 - 带缓存和多路径支持"""
-
-    # ========= 1. 参数验证 =========
-    if not path or path.strip() == "":
-        raise HTTPException(status_code=404, detail="File not specified")
-
-    # 防止路径遍历攻击
-    if ".." in path or path.startswith("/"):
-        logger.warning(f"非法路径尝试: {path}")
-        raise HTTPException(status_code=400, detail="Invalid file path")
-
-    # 统一路径分隔符
-    path = path.replace("\\", "/")
-    logger.debug(f"📸 文件请求: {path}")
-
-    try:
-        # ========= 2. 缓存命中 =========
-        cached = FILE_CACHE.get(path)
-        if cached:
-            if cached.exists() and cached.is_file():
-                media_type, _ = mimetypes.guess_type(str(cached))
-                logger.debug(f"✅ 缓存命中: {path}")
-                return FileResponse(
-                    cached,
-                    media_type=media_type or "application/octet-stream",
-                    headers={"Cache-Control": "public, max-age=31536000"},
-                )
-            else:
-                # 缓存的文件已不存在，删除缓存
-                FILE_CACHE.pop(path, None)
-                logger.debug(f"缓存文件已不存在: {path}")
-
-        # ========= 3. 查找文件 =========
-        found_path = None
-        for root in ROOT_PATHS:
-            try:
-                full_path = (root / path).resolve()
-
-                # 安全检查：确保文件路径在根路径内
-                if not str(full_path).startswith(str(root)):
-                    logger.debug(f"路径越界: {full_path} 不在 {root} 内")
-                    continue
-
-                if full_path.exists() and full_path.is_file():
-                    found_path = full_path
-                    logger.info(f"✅ 找到截图: {path} 在 {root}")
-                    break
-
-            except PermissionError:
-                logger.debug(f"无权限访问: {root}")
-                continue
-            except Exception as e:
-                logger.debug(f"查找路径 {root} 时出错: {e}")
-                continue
-
-        if found_path:
-            # 写入缓存
-            FILE_CACHE[path] = found_path
-
-            # 限制缓存大小（防止内存溢出）
-            if len(FILE_CACHE) > 1000:
-                # 删除最旧的缓存项
-                oldest_key = next(iter(FILE_CACHE))
-                FILE_CACHE.pop(oldest_key, None)
-
-            media_type, _ = mimetypes.guess_type(str(found_path))
-
-            return FileResponse(
-                found_path,
-                media_type=media_type or "application/octet-stream",
-                headers={"Cache-Control": "public, max-age=31536000"},
-            )
-
-        # ========= 4. 未找到 - 详细调试信息 =========
-        logger.warning(f"❌ 截图不存在: {path}")
-
-        # 尝试列出父目录内容帮助调试
-        for root in ROOT_PATHS[:3]:  # 只检查前3个
-            try:
-                parent_dir = root / Path(path).parent
-                if parent_dir.exists() and parent_dir.is_dir():
-                    files = list(parent_dir.glob("*"))[:10]
-                    if files:
-                        logger.info(f"目录 {parent_dir} 中的文件 (前10个):")
-                        for f in files:
-                            file_type = "📁" if f.is_dir() else "📄"
-                            size = f.stat().st_size if f.is_file() else 0
-                            logger.info(f"   {file_type} {f.name} ({size} bytes)")
-            except Exception:
-                continue
-
-        raise HTTPException(status_code=404, detail="File not found")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"截图服务错误: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Server error")
-
-
 # ==================== 工具函数 ====================
 
 
@@ -3086,51 +3008,106 @@ def format_client_dict(client):
 
 # ==================== 静态文件服务 ====================
 
-# 1. 截图目录处理（使用第二个版本的健壮实现）
+# 1. 截图目录处理（方案3 - StaticFiles）
 screenshots_path = Path(Config.SCREENSHOT_DIR)
 logger.info(f"配置的截图目录: {screenshots_path}")
 
+# 确保截图目录存在
+try:
+    screenshots_path.mkdir(parents=True, exist_ok=True)
+except Exception as e:
+    logger.error(f"创建截图目录失败: {e}")
+
 # 检查主目录
 if screenshots_path.exists():
-    app.mount(
-        "/screenshots", StaticFiles(directory=str(screenshots_path)), name="screenshots"
-    )
-    logger.info(f"✅ 截图目录已挂载: /screenshots -> {screenshots_path}")
+    # 确保缩略图目录存在
+    thumbnails_path = screenshots_path / "thumbnails"
+    thumbnails_path.mkdir(parents=True, exist_ok=True)
 
-    # 调试信息
-    webp_files = list(screenshots_path.glob("**/*.webp"))
-    logger.info(f"找到 {len(webp_files)} 个 .webp 文件")
-    if webp_files:
-        sample_files = webp_files[:5]
-        logger.info(
-            f"示例截图路径: {[str(f.relative_to(screenshots_path)) for f in sample_files]}"
+    # 挂载 StaticFiles（方案3）
+    try:
+        app.mount(
+            "/screenshots",
+            StaticFiles(directory=str(screenshots_path)),
+            name="screenshots",
         )
+        logger.info(f"✅ 截图目录已挂载: /screenshots -> {screenshots_path}")
+        logger.info(f"   ✅ 无缓存限制，可访问所有历史图片")
+
+        # 调试信息
+        webp_files = list(screenshots_path.glob("**/*.webp"))
+        logger.info(f"找到 {len(webp_files)} 个 .webp 文件")
+        if webp_files:
+            sample_files = webp_files[:5]
+            logger.info(
+                f"示例截图路径: {[str(f.relative_to(screenshots_path)) for f in sample_files]}"
+            )
+    except Exception as e:
+        logger.error(f"❌ StaticFiles 挂载失败: {e}")
+        # 如果挂载失败，使用备用方案（自定义路由，但无缓存）
+        logger.info("使用备用文件服务方案...")
+
+        @app.get("/screenshots/{path:path}", tags=["文件"])
+        async def serve_screenshot_fallback(path: str):
+            """备用截图服务 - 无缓存版本"""
+            if not path or ".." in path or path.startswith("/"):
+                raise HTTPException(status_code=400, detail="Invalid file path")
+
+            path = path.replace("\\", "/")
+            full_path = (screenshots_path / path).resolve()
+
+            if (
+                str(full_path).startswith(str(screenshots_path))
+                and full_path.exists()
+                and full_path.is_file()
+            ):
+                media_type, _ = mimetypes.guess_type(str(full_path))
+                return FileResponse(
+                    full_path,
+                    media_type=media_type or "application/octet-stream",
+                    headers={"Cache-Control": "public, max-age=3600"},
+                )
+
+            raise HTTPException(status_code=404, detail="File not found")
+
 else:
     # 备选方案
     alt_screenshots_path = Path.cwd() / "screenshots"
-    if alt_screenshots_path.exists():
-        logger.info(f"使用备用截图目录: {alt_screenshots_path}")
+    alt_screenshots_path.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"使用备用截图目录: {alt_screenshots_path}")
+    try:
         app.mount(
             "/screenshots",
             StaticFiles(directory=str(alt_screenshots_path)),
             name="screenshots",
         )
-    else:
-        logger.error("=" * 50)
-        logger.error("❌ 无法找到截图目录！")
-        logger.error(
-            f"请创建目录或软链接: ln -s /actual/screenshots/path {Config.SCREENSHOT_DIR}"
-        )
-        logger.error("=" * 50)
+        logger.info(f"✅ 备用截图目录已挂载: /screenshots -> {alt_screenshots_path}")
+
+        # 更新全局变量，供其他函数使用
+        screenshots_path = alt_screenshots_path
+    except Exception as e:
+        logger.error(f"❌ 备用目录挂载失败: {e}")
 
 # 2. 静态资源目录（如assets）
 assets_dir = Path.cwd() / "assets"
 if assets_dir.exists():
-    app.mount("/assets", StaticFiles(directory="assets"), name="assets")
-    logger.info(f"✅ 静态资源目录已挂载: /assets")
+    try:
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+        logger.info(f"✅ 静态资源目录已挂载: /assets")
+    except Exception as e:
+        logger.error(f"❌ 静态资源目录挂载失败: {e}")
+else:
+    logger.info("静态资源目录不存在，跳过挂载")
 
-# 3. 前端路由处理（使用第一个版本的前端路由）
+# 3. 前端路由处理
 index_path = Path.cwd() / "index.html"
+if not index_path.exists():
+    # 尝试在 dist 目录中查找
+    dist_index = Path.cwd() / "dist" / "index.html"
+    if dist_index.exists():
+        index_path = dist_index
+        logger.info(f"在 dist 目录找到 index.html: {index_path}")
 
 
 @app.get("/")
@@ -3138,7 +3115,8 @@ async def serve_root():
     """根路径返回 index.html"""
     if index_path.exists():
         return FileResponse(index_path)
-    return {"error": "Frontend not found"}, 404
+    logger.error("❌ index.html 不存在")
+    return {"error": "Frontend not found", "status": "index.html missing"}, 404
 
 
 @app.get("/{full_path:path}")
@@ -3146,7 +3124,15 @@ async def serve_frontend(full_path: str):
     """处理所有前端路由（SPA支持）"""
 
     # 跳过API路径
-    if full_path.startswith(("api/", "screenshots/", "assets/")):
+    if full_path.startswith("api/"):
+        return {"error": "Resource not found"}, 404
+
+    # 跳过截图路径（由 StaticFiles 处理）
+    if full_path.startswith("screenshots/"):
+        return {"error": "Resource not found"}, 404
+
+    # 跳过 assets 路径（由 StaticFiles 处理）
+    if full_path.startswith("assets/"):
         return {"error": "Resource not found"}, 404
 
     # 检查是否是静态文件
@@ -3163,18 +3149,86 @@ async def serve_frontend(full_path: str):
         ".woff2",
         ".ttf",
         ".eot",
+        ".webp",
     )
 
-    if full_path.endswith(static_extensions):
+    if any(full_path.endswith(ext) for ext in static_extensions):
+        # 先检查当前目录
         file_path = Path.cwd() / full_path
         if file_path.exists() and file_path.is_file():
             return FileResponse(file_path)
+
+        # 再检查 dist 目录
+        dist_path = Path.cwd() / "dist" / full_path
+        if dist_path.exists() and dist_path.is_file():
+            return FileResponse(dist_path)
+
+        logger.debug(f"静态文件不存在: {full_path}")
 
     # 其他所有路径返回 index.html（SPA路由）
     if index_path.exists():
         return FileResponse(index_path)
 
     return {"error": "Frontend not found"}, 404
+
+
+# ==================== 可选：文件系统健康检查 ====================
+
+
+@app.get("/api/health/filesystem", tags=["系统"])
+async def check_filesystem_health():
+    """检查文件系统健康状态"""
+    result = {
+        "screenshots_directory": {
+            "path": str(screenshots_path),
+            "exists": screenshots_path.exists(),
+            "writable": (
+                os.access(str(screenshots_path), os.W_OK)
+                if screenshots_path.exists()
+                else False
+            ),
+            "file_count": len(list(screenshots_path.glob("**/*.*"))),
+        },
+        "index_file": {
+            "path": str(index_path),
+            "exists": index_path.exists(),
+        },
+    }
+
+    # 检查最近的文件（用于验证）
+    try:
+        recent_files = list(screenshots_path.glob("**/*.webp"))[:5]
+        result["screenshots_directory"]["recent_files"] = [
+            str(f.relative_to(screenshots_path)) for f in recent_files
+        ]
+    except Exception as e:
+        result["screenshots_directory"]["recent_files_error"] = str(e)
+
+    return result
+
+
+def fix_screenshot_urls(db_session):
+    """修复数据库中可能错误的截图URL"""
+    from server_models import Screenshot
+
+    screenshots = db_session.query(Screenshot).all()
+    fixed_count = 0
+
+    for ss in screenshots:
+        # 正确的URL格式应该是 /screenshots/路径
+        correct_url = f"/screenshots/{ss.filename}"
+
+        if ss.storage_url != correct_url:
+            old_url = ss.storage_url
+            ss.storage_url = correct_url
+            fixed_count += 1
+            logger.debug(f"修复截图 {ss.id} URL: {old_url} -> {correct_url}")
+
+    if fixed_count > 0:
+        db_session.commit()
+        logger.info(f"✅ 已修复 {fixed_count} 个截图的URL")
+
+    return fixed_count
 
 
 if __name__ == "__main__":
