@@ -5,6 +5,7 @@
         <div class="login-header">
           <el-icon :size="48"><Camera /></el-icon>
           <h2>DHPG监控系统</h2>
+          <p class="subtitle">努力的人都有好运</p>
         </div>
       </template>
 
