@@ -1470,32 +1470,22 @@ def get_employees(
     current_user: models.User = Depends(get_current_active_user),
 ):
     """
-    获取员工列表（生产级版本）
-    支持：
-    - 分页
-    - 搜索
-    - 状态筛选
-    - 在线状态筛选
+    获取员工列表 - 修复时区问题
+    数据库是 timestamptz，直接用北京时间判断在线状态
     """
     logger = logging.getLogger(__name__)
-    logger.debug(
-        f"员工列表请求 - skip:{skip}, limit:{limit}, status:{status}, online_only:{online_only}, search:{search}"
-    )
 
-    # 🚀 获取当前UTC时间（aware）
-    now_utc = get_utc_now()
+    # ===== 1. 获取北京时间 =====
+    beijing_now = get_beijing_now()
+    cutoff_time = beijing_now - timedelta(minutes=10)  # 10分钟前的北京时间
 
-    # 🚀 计算10分钟前的UTC时间（aware）
-    cutoff_utc = now_utc - timedelta(minutes=10)
+    logger.debug(f"员工列表请求参数:")
+    logger.debug(f"  skip={skip}, limit={limit}, status={status}")
+    logger.debug(f"  online_only={online_only}, search={search}")
+    logger.debug(f"  当前北京时间: {beijing_now}")
+    logger.debug(f"  在线判断阈值: {cutoff_time}")
 
-    # 🚀 转换为naive UTC用于数据库查询（因为数据库存储的是naive）
-    cutoff_naive = cutoff_utc.replace(tzinfo=None)
-
-    logger.debug(f"当前UTC时间: {now_utc}")
-    logger.debug(f"在线判断阈值: {cutoff_utc} (UTC)")
-    logger.debug(f"数据库查询阈值: {cutoff_naive} (naive UTC)")
-
-    # 基础查询
+    # ===== 2. 基础查询 =====
     query = db.query(models.Employee)
 
     # 状态筛选
@@ -1514,30 +1504,29 @@ def get_employees(
             )
         )
 
-    # 🚀 在线筛选（数据库级）- 修复版
+    # ===== 3. 在线筛选 =====
     if online_only is not None:
-        # 使用正确的子查询
         from sqlalchemy import exists, and_
 
-        # 🚀 关键修复：使用 naive UTC 进行比较
+        # 🚨 关键：直接用北京时间比较，因为 last_seen 是 timestamptz
         online_subquery = exists().where(
             and_(
                 models.Client.employee_id == models.Employee.employee_id,
-                models.Client.last_seen >= cutoff_naive,  # 使用 naive UTC
+                models.Client.last_seen >= cutoff_time,  # ✅ 直接用北京时间
             )
         )
 
         if online_only:
             query = query.filter(online_subquery)
-            logger.debug(f"应用在线筛选，时间阈值: {cutoff_naive} (naive UTC)")
+            logger.debug(f"应用在线筛选，阈值: {cutoff_time}")
         else:
             query = query.filter(~online_subquery)
-            logger.debug(f"应用离线筛选，时间阈值: {cutoff_naive} (naive UTC)")
+            logger.debug(f"应用离线筛选，阈值: {cutoff_time}")
 
-    # 总数统计
+    # ===== 4. 总数统计 =====
     total = query.count()
 
-    # 分页 + 预加载 clients
+    # ===== 5. 分页查询 =====
     employees = (
         query.options(selectinload(models.Employee.clients))
         .offset(skip)
@@ -1545,19 +1534,11 @@ def get_employees(
         .all()
     )
 
-    # 🚀 转换为 dict 时处理时间字段
+    # ===== 6. 格式化返回数据 =====
     items = []
     for emp in employees:
         emp_dict = emp.to_dict()
-
-        # 确保 last_active 是字符串（如果存在）
-        if emp_dict.get("last_active"):
-            # 已经是 isoformat 字符串，不需要再处理
-            pass
-
-        # 添加在线状态（双重保证）
-        emp_dict["is_online"] = emp.has_active_clients
-
+        # 在线状态已经在 to_dict() 中通过 has_active_clients 计算好了
         items.append(emp_dict)
 
     logger.debug(f"返回 {len(items)} 条记录，总数: {total}")
@@ -2178,8 +2159,6 @@ def get_recent_screenshots(
 
 
 # ==================== 客户端管理接口 ====================
-
-
 @app.get("/api/clients", tags=["客户端"])
 def get_clients(
     skip: int = 0,
@@ -2188,27 +2167,46 @@ def get_clients(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user),
 ):
-    """获取客户端列表 - 支持分页"""
+    """
+    获取客户端列表 - 修复时区问题
+    数据库是 timestamptz，直接用北京时间判断在线状态
+    """
     logger = logging.getLogger(__name__)
 
-    # 构建查询
+    # ===== 1. 获取北京时间 =====
+    beijing_now = get_beijing_now()
+    cutoff_time = beijing_now - timedelta(minutes=10)  # 10分钟前的北京时间
+
+    logger.debug(
+        f"客户端列表请求: skip={skip}, limit={limit}, online_only={online_only}"
+    )
+    logger.debug(f"当前北京时间: {beijing_now}")
+    logger.debug(f"在线判断阈值: {cutoff_time}")
+
+    # ===== 2. 构建查询 =====
     query = db.query(models.Client)
 
+    # ===== 3. 在线筛选 =====
     if online_only:
-        cutoff = get_utc_now() - timedelta(minutes=10)
-        query = query.filter(models.Client.last_seen >= cutoff)
+        query = query.filter(
+            models.Client.last_seen >= cutoff_time
+        )  # ✅ 直接用北京时间
 
-    # 获取总数
+    # ===== 4. 获取总数 =====
     total = query.count()
 
-    # 获取分页数据
+    # ===== 5. 获取分页数据 =====
     clients = (
         query.order_by(models.Client.last_seen.desc()).offset(skip).limit(limit).all()
     )
 
-    # ✅ 统一返回格式
+    # ===== 6. 格式化返回数据 =====
+    items = [c.to_dict() for c in clients]  # to_dict() 已经处理好时间
+
+    logger.debug(f"返回 {len(items)} 条记录，总数: {total}")
+
     return {
-        "items": [c.to_dict() for c in clients],
+        "items": items,
         "total": total,
         "skip": skip,
         "limit": limit,
