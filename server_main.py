@@ -1149,22 +1149,12 @@ async def upload_screenshot(
     file: UploadFile = File(...),
 ):
     """
-    上传截图 - 完整修复版
-
-    功能：
-    - 支持多种图片格式
-    - 自动创建员工和客户端记录
-    - 生成缩略图
-    - 统一北京时间处理
-    - 数据库存储 naive UTC
+    上传截图 - 修复时区问题
+    数据库是 timestamptz，直接存储带时区的时间
     """
 
     # ========== 导入所需模块 ==========
-    import os
-    import shutil
-    from pathlib import Path
-    from datetime import datetime, timezone, timedelta
-    from PIL import Image
+    from PIL import Image  # ✅ 添加这个导入
 
     # ========== 1. 类型转换 ==========
     is_encrypted = encrypted.lower() in ("true", "1", "yes", "on")
@@ -1184,13 +1174,13 @@ async def upload_screenshot(
         raise HTTPException(status_code=400, detail=f"不支持的文件类型: {file_ext}")
 
     # ========== 3. 时间处理 ==========
-    # 获取当前北京时间（用于显示）
+    # 获取当前北京时间（带时区）
     beijing_now = get_beijing_now()
 
     # 解析截图时间（客户端传来的时间是北京时间）
     try:
         if timestamp:
-            # 尝试多种格式解析
+            # 尝试解析多种格式
             try:
                 screenshot_time = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
             except ValueError:
@@ -1200,20 +1190,15 @@ async def upload_screenshot(
                     screenshot_time = datetime.strptime(timestamp, "%Y-%m-%d")
 
             # 添加北京时间时区
-            screenshot_time = make_aware(screenshot_time, BEIJING_TZ)
+            screenshot_time = screenshot_time.replace(tzinfo=BEIJING_TZ)
         else:
             screenshot_time = beijing_now
     except Exception as e:
         logger.warning(f"时间解析失败: {e}, 使用当前北京时间")
         screenshot_time = beijing_now
 
-    # 转换为 naive UTC 用于数据库存储
-    screenshot_time_utc_naive = make_naive(screenshot_time)
-    current_time_utc_naive = make_naive(get_utc_now())
-
-    logger.debug(f"截图时间(北京时间): {format_beijing_time(screenshot_time)}")
-    logger.debug(f"截图时间(UTC naive): {screenshot_time_utc_naive}")
-    logger.debug(f"当前时间(UTC naive): {current_time_utc_naive}")
+    logger.info(f"截图时间(北京时间): {format_beijing_time(screenshot_time)}")
+    logger.info(f"当前时间(北京时间): {format_beijing_time(beijing_now)}")
 
     # ========== 4. 处理客户端 ==========
     client = None
@@ -1223,8 +1208,8 @@ async def upload_screenshot(
         )
 
     if client:
-        # 更新客户端最后在线时间（存储 naive UTC）
-        client.last_seen = current_time_utc_naive
+        # 🚨 关键：直接存储带时区的时间
+        client.last_seen = beijing_now
         logger.debug(f"客户端 {client_id} 最后在线时间已更新")
 
         if not client.employee_id:
@@ -1238,7 +1223,7 @@ async def upload_screenshot(
             employee_id=employee_id,
             computer_name=computer_name,
             windows_user=windows_user,
-            last_seen=current_time_utc_naive,
+            last_seen=beijing_now,  # ✅ 直接存带时区的时间
             config={
                 "interval": Config.SCREENSHOT_INTERVAL,
                 "quality": Config.SCREENSHOT_QUALITY,
@@ -1277,7 +1262,7 @@ async def upload_screenshot(
             department="自动注册",
             position="员工",
             status="active",
-            created_at=current_time_utc_naive,
+            created_at=beijing_now,  # ✅ 直接存带时区的时间
         )
         db.add(employee)
         logger.info(f"✅ 自动创建员工: {employee_id} - {employee_name}")
@@ -1318,7 +1303,7 @@ async def upload_screenshot(
     # ========== 8. 获取图片尺寸 ==========
     width = height = 0
     try:
-        with Image.open(file_path) as img:
+        with Image.open(file_path) as img:  # ✅ 现在可以使用 Image 了
             width, height = img.size
         logger.debug(f"图片尺寸: {width}x{height}")
     except Exception as e:
@@ -1334,9 +1319,9 @@ async def upload_screenshot(
         width=width,
         height=height,
         storage_url=f"/screenshots/{filename}",
-        # 数据库存储 naive UTC
-        screenshot_time=screenshot_time_utc_naive,
-        uploaded_at=current_time_utc_naive,
+        # 🚨 关键：直接存储带时区的时间
+        screenshot_time=screenshot_time,  # ✅ 北京时间带时区
+        uploaded_at=beijing_now,  # ✅ 北京时间带时区
         computer_name=computer_name,
         windows_user=windows_user,
         image_format=format,
@@ -1359,7 +1344,7 @@ async def upload_screenshot(
                 "format": format,
                 "filename": filename,
             },
-            created_at=current_time_utc_naive,
+            created_at=beijing_now,  # ✅ 直接存带时区的时间
         )
         db.add(activity)
     except Exception as e:
@@ -1372,6 +1357,7 @@ async def upload_screenshot(
             f"✅ 截图保存成功: {filename} "
             f"({file_size/1024:.1f}KB) - 员工: {employee_id}"
         )
+        logger.info(f"  截图时间: {format_beijing_time(screenshot_time)}")
     except Exception as e:
         db.rollback()
         logger.error(f"数据库提交失败: {e}")
@@ -2920,14 +2906,28 @@ def get_file_stats(
 
 
 # ==================== 辅助函数：统一格式化 ====================
-
-
 def format_screenshot_response(row_dict):
     """
-    统一格式化截图响应
+    统一格式化截图响应 - 修复URL路径问题
     确保所有截图接口返回相同的字段结构
     """
     st = row_dict.get("screenshot_time")
+
+    # ===== 🚨 关键修复：确保URL以 /screenshots/ 开头 =====
+    storage_url = row_dict.get("storage_url")
+    if storage_url and not storage_url.startswith("/screenshots/"):
+        # 如果storage_url不正确，从filename构建
+        filename = row_dict.get("filename")
+        if filename:
+            storage_url = f"/screenshots/{filename}"
+        else:
+            storage_url = None
+
+    thumbnail = row_dict.get("thumbnail")
+    if thumbnail and not thumbnail.startswith("/screenshots/"):
+        thumbnail = f"/screenshots/{thumbnail}"
+
+    # =================================================
 
     return {
         # 基础字段
@@ -2936,11 +2936,11 @@ def format_screenshot_response(row_dict):
         "name": row_dict.get("employee_name") or row_dict.get("employee_id"),
         "client_id": row_dict.get("client_id"),
         "filename": row_dict.get("filename"),
-        "thumbnail": row_dict.get("thumbnail"),
+        "thumbnail": thumbnail,  # ✅ 修复后的缩略图URL
         "file_size": row_dict.get("file_size"),
         "width": row_dict.get("width"),
         "height": row_dict.get("height"),
-        "storage_url": row_dict.get("storage_url"),
+        "storage_url": storage_url,  # ✅ 修复后的原图URL
         "uploaded_at": (
             row_dict.get("uploaded_at").isoformat()
             if row_dict.get("uploaded_at")
@@ -2952,7 +2952,7 @@ def format_screenshot_response(row_dict):
         "image_format": row_dict.get("image_format"),
         "is_encrypted": row_dict.get("is_encrypted"),
         # 派生字段
-        "url": row_dict.get("storage_url"),
+        "url": storage_url,  # ✅ 使用修复后的URL
         "time": st.strftime("%H:%M:%S") if st else None,
         "date": st.strftime("%Y-%m-%d") if st else None,
         "datetime": st.strftime("%Y-%m-%d %H:%M:%S") if st else None,
