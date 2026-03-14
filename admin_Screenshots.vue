@@ -363,32 +363,38 @@ const getEmployeeName = (item) => {
   const name = employeeNameMap.value.get(item.employee_id);
   return name || item.employee_id;
 };
+const getImageUrl = (path, options = {}) => {
+  const { debug = false } = options;
 
-// 获取图片URL
-const getImageUrl = (path) => {
   if (!path) return "";
+
+  // 1. 已经是完整URL
   if (path.startsWith("http")) return path;
 
-  // 处理Windows路径分隔符
-  const cleanPath = path.replace(/\\/g, "/");
+  // 2. 处理Windows路径分隔符
+  let cleanPath = path.replace(/\\/g, "/");
 
-  // 使用当前域名
-  const baseUrl = window.location.origin;
+  // 3. 标准化路径
+  // 移除可能的前置 /screenshots/ 或 screenshots/
+  cleanPath = cleanPath.replace(/^\/?(screenshots\/)?/, "");
 
-  let finalUrl;
-  if (cleanPath.startsWith("/screenshots/")) {
-    finalUrl = `${baseUrl}${cleanPath}`;
-  } else {
-    finalUrl = `${baseUrl}/screenshots${cleanPath.startsWith("/") ? "" : "/"}${cleanPath}`;
-  }
+  // 4. URL编码，处理中文和特殊字符
+  const encodedPath = cleanPath
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
 
-  // ✅ 添加调试日志（只打印前几个，避免刷屏）
-  if (Math.random() < 0.01) {
-    // 1%的概率打印，避免日志太多
+  // 5. 构建最终URL
+  const finalUrl = `${window.location.origin}/screenshots/${encodedPath}`;
+
+  // 6. 调试日志（使用抽样或显式控制）
+  if (debug || Math.random() < 0.01) {
     console.log("图片URL转换:", {
       original: path,
-      cleanPath: cleanPath,
+      cleaned: cleanPath,
+      encoded: encodedPath,
       finalUrl: finalUrl,
+      timestamp: new Date().toISOString(),
     });
   }
 
