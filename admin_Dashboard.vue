@@ -86,7 +86,7 @@
               />
               <div class="activity-content">
                 <div class="activity-title">
-                  <span class="employee">{{ act.employee_id }}</span>
+                  <span class="employee">{{ act.employee_name || act.employee_id }}</span>
                   <span class="action">{{ act.action }}</span>
                 </div>
                 <div class="activity-time">{{ act.time }}</div>

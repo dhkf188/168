@@ -2423,19 +2423,35 @@ def get_stats(
 
     formatted_activities = []
     for a in recent_activities:
+        # 获取员工姓名
+        employee_name = a.employee_id  # 默认显示ID
+        if a.employee_id:
+            employee = db.query(models.Employee).filter(
+                models.Employee.employee_id == a.employee_id
+            ).first()
+            if employee and employee.name:
+                employee_name = employee.name  # ✅ 使用员工姓名
+        
         time_str = a.created_at.strftime("%Y-%m-%d %H:%M:%S") if a.created_at else None
         formatted_activities.append(
             {
-                "employee_id": a.employee_id,
+                "employee_id": a.employee_id,  # 保留ID供参考
+                "employee_name": employee_name,  # ✅ 新增姓名字段
                 "action": a.action,
-                "time": time_str,  # ✅ 已经是北京时间
+                "time": time_str,
             }
         )
 
+
     # ===== 15. 各员工截图统计 =====
-    top_employees = []
-    employees = db.query(models.Employee).limit(5).all()
-    for emp in employees:
+    # 创建一个列表来存储所有有截图的员工数据
+    all_employee_stats = []
+
+    # 获取所有员工
+    all_employees = db.query(models.Employee).all()
+
+    for emp in all_employees:
+        # 今日截图
         today_emp = (
             db.query(models.Screenshot)
             .filter(
@@ -2445,21 +2461,32 @@ def get_stats(
             )
             .count()
         )
-
+        
+        # 累计截图
         total_emp = (
             db.query(models.Screenshot)
             .filter(models.Screenshot.employee_id == emp.employee_id)
             .count()
         )
-
-        top_employees.append(
-            {
+        
+        # 只添加有截图的员工（今日截图>0 或 累计截图>0）
+        if today_emp > 0 or total_emp > 0:
+            all_employee_stats.append({
                 "id": emp.employee_id,
                 "name": emp.name,
                 "today": today_emp,
                 "total": total_emp,
-            }
-        )
+            })
+
+    # 按今日截图数量降序排序
+    all_employee_stats.sort(key=lambda x: x["today"], reverse=True)
+
+    # 取前5名
+    top_employees = all_employee_stats[:5]
+
+    # 如果不足5个，就返回全部
+    # top_employees = all_employee_stats  # 如果想返回全部，可以用这行
+
 
     logger.info(f"统计结果:")
     logger.info(f"  今日截图: {today_count}")
