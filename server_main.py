@@ -894,13 +894,14 @@ async def get_current_user_info(
     return current_user
 
 
+# ==================== 客户端接口 ====================
 @app.post("/api/client/register", response_model=schemas.Client, tags=["客户端"])
 async def register_client(
     client_info: schemas.ClientCreate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """客户端注册 - 融合两个版本的优点"""
+    """客户端注册 - 增强硬件识别版"""
 
     beijing_now = get_beijing_now()
 
@@ -912,12 +913,25 @@ async def register_client(
 
     employee_name = getattr(client_info, "employee_name", None)
 
-    # ===== 1. 多重硬件查找（版本2的优点） =====
+    # ===== 1. 多重硬件查找（新增硬件指纹优先）=====
     existing_client = None
     client_found_by = None
 
+    # 优先级0: 硬件指纹（最精确）
+    if client_info.hardware_fingerprint:
+        existing_client = (
+            db.query(models.Client)
+            .filter(
+                models.Client.hardware_fingerprint == client_info.hardware_fingerprint
+            )
+            .first()
+        )
+        if existing_client:
+            client_found_by = "hardware_fingerprint"
+            logger.info(f"✅ 通过硬件指纹找到现有客户端")
+
     # 优先级1: client_id
-    if client_info.client_id:
+    if not existing_client and client_info.client_id:
         existing_client = (
             db.query(models.Client)
             .filter(models.Client.client_id == client_info.client_id)
@@ -936,7 +950,7 @@ async def register_client(
         if existing_client:
             client_found_by = "mac_address"
 
-    # 优先级3: 硬盘序列号（版本2新增）
+    # 优先级3: 硬盘序列号
     if not existing_client and client_info.disk_serial:
         existing_client = (
             db.query(models.Client)
@@ -946,7 +960,7 @@ async def register_client(
         if existing_client:
             client_found_by = "disk_serial"
 
-    # 优先级4: CPU ID + MAC组合（版本2新增）
+    # 优先级4: CPU ID + MAC组合
     if not existing_client and client_info.cpu_id and client_info.mac_address:
         existing_client = (
             db.query(models.Client)
@@ -959,7 +973,7 @@ async def register_client(
         if existing_client:
             client_found_by = "cpu_mac_combo"
 
-    # ===== 2. 后备方案：计算机名+用户名（版本1保留） =====
+    # 优先级5: 计算机名+用户名（后备方案）
     if not existing_client and client_info.computer_name and client_info.windows_user:
         existing_client = (
             db.query(models.Client)
@@ -972,14 +986,14 @@ async def register_client(
         if existing_client:
             client_found_by = "computer_user_combo"
 
-    # ===== 3. 处理现有客户端（融合智能更新） =====
+    # ===== 2. 处理现有客户端 =====
     if existing_client:
         logger.info(f"找到现有客户端 [{client_found_by}]: {existing_client.client_id}")
 
         # 保留原有client_id
         original_client_id = existing_client.client_id
 
-        # 更新信息（版本1的更新逻辑）
+        # 更新信息
         update_data = client_info.dict(exclude_unset=True, exclude_none=True)
         for key, value in update_data.items():
             if (
@@ -993,7 +1007,18 @@ async def register_client(
         existing_client.client_id = original_client_id
         existing_client.last_seen = beijing_now
 
-        # 智能更新员工姓名（版本1的智能逻辑）
+        # ===== 新增：更新硬件指纹信息 =====
+        if (
+            client_info.hardware_fingerprint
+            and not existing_client.hardware_fingerprint
+        ):
+            existing_client.hardware_fingerprint = client_info.hardware_fingerprint
+            existing_client.hardware_parts = client_info.hardware_parts
+            existing_client.has_hardware = client_info.has_hardware
+            logger.info(f"✅ 更新硬件指纹: {client_info.hardware_fingerprint[:16]}...")
+        # ================================
+
+        # 智能更新员工姓名
         if employee_name and existing_client.employee_id:
             employee = (
                 db.query(models.Employee)
@@ -1015,29 +1040,20 @@ async def register_client(
 
         return existing_client
 
-    # ===== 4. 生成硬件指纹（版本2的优点） =====
-    import hashlib
+    # ===== 3. 生成唯一员工ID =====
     import uuid
+    import hashlib
 
-    # 收集所有可用硬件信息
-    hardware_parts = []
-    if client_info.mac_address:
-        hardware_parts.append(f"mac:{client_info.mac_address}")
-    if client_info.disk_serial:
-        hardware_parts.append(f"disk:{client_info.disk_serial}")
-    if client_info.cpu_id:
-        hardware_parts.append(f"cpu:{client_info.cpu_id}")
-
-    if hardware_parts:
-        fingerprint = "|".join(sorted(hardware_parts))
-        hash_obj = hashlib.sha256(fingerprint.encode())
-        unique_suffix = hash_obj.hexdigest()[:12]
-        logger.info(f"基于硬件指纹生成唯一ID")
+    # 生成唯一后缀
+    if client_info.hardware_fingerprint:
+        # 使用硬件指纹的前12位作为后缀
+        unique_suffix = client_info.hardware_fingerprint[:12]
+        logger.info(f"基于硬件指纹生成唯一ID: {unique_suffix}")
     else:
         unique_suffix = str(uuid.uuid4())[:12]
         logger.warning("无硬件信息，使用随机UUID")
 
-    # ===== 5. 生成员工ID（保留版本1的格式） =====
+    # 生成员工ID
     if client_info.computer_name and client_info.windows_user:
         base_id = f"{client_info.computer_name}\\{client_info.windows_user}"
         employee_id = f"{base_id}_{unique_suffix}"
@@ -1050,7 +1066,7 @@ async def register_client(
 
     logger.info(f"生成员工ID: {employee_id}")
 
-    # ===== 6. 创建新员工（版本1的逻辑） =====
+    # ===== 4. 创建新员工 =====
     final_name = (
         employee_name
         or client_info.windows_user
@@ -1069,7 +1085,7 @@ async def register_client(
     )
     db.add(employee)
 
-    # ===== 7. 创建新客户端 =====
+    # ===== 5. 创建新客户端 =====
     client_id = client_info.client_id or f"client_{unique_suffix}"
 
     new_client = models.Client(
@@ -1092,6 +1108,11 @@ async def register_client(
             "enable_batch_upload": True,
         },
         capabilities=client_info.capabilities or [],
+        # ===== 新增：保存硬件指纹信息 =====
+        hardware_fingerprint=client_info.hardware_fingerprint,
+        hardware_parts=client_info.hardware_parts,
+        has_hardware=client_info.has_hardware or False,
+        # ================================
     )
 
     db.add(new_client)
@@ -1099,81 +1120,8 @@ async def register_client(
     db.refresh(new_client)
 
     logger.info(f"✅ 新客户端注册成功: {client_id} -> 员工: {employee_id}")
-
-    return new_client
-
-    # ========== 4. 创建新客户端和新员工 ==========
-    logger.info("创建新客户端和新员工")
-
-    # 生成唯一员工ID
-    import uuid
-
-    unique_suffix = str(uuid.uuid4())[:8]
-
-    if client_info.computer_name and client_info.windows_user:
-        base_id = f"{client_info.computer_name}\\{client_info.windows_user}"
-        employee_id = base_id
-    elif client_info.computer_name:
-        employee_id = f"{client_info.computer_name}_{unique_suffix}"
-    else:
-        employee_id = f"employee_{unique_suffix}"
-
-    logger.info(f"生成唯一员工ID: {employee_id}")
-
-    # 确定员工姓名
-    if employee_name:
-        final_name = employee_name
-    elif client_info.windows_user:
-        final_name = (
-            f"{client_info.computer_name or '未知'} - {client_info.windows_user}"
-        )
-    else:
-        final_name = client_info.computer_name or f"员工_{unique_suffix[:4]}"
-
-    # 创建新员工
-    employee = models.Employee(
-        employee_id=employee_id,
-        name=final_name,
-        computer_name=client_info.computer_name,
-        windows_user=client_info.windows_user,
-        department="自动注册",
-        status="active",
-        created_at=beijing_now,
-    )
-    db.add(employee)
-    logger.info(f"✅ 创建新员工: {employee_id} 姓名: {final_name}")
-
-    # 生成客户端ID（如果未提供）
-    client_id = client_info.client_id or f"client_{unique_suffix}"
-
-    # 创建新客户端
-    new_client = models.Client(
-        client_id=client_id,
-        employee_id=employee_id,
-        computer_name=client_info.computer_name,
-        windows_user=client_info.windows_user,
-        mac_address=client_info.mac_address,
-        ip_address=client_info.ip_address,
-        os_version=client_info.os_version,
-        cpu_id=client_info.cpu_id,
-        disk_serial=client_info.disk_serial,
-        client_version=client_info.client_version,
-        last_seen=beijing_now,
-        config={
-            "interval": client_info.interval or Config.SCREENSHOT_INTERVAL,
-            "quality": client_info.quality or Config.SCREENSHOT_QUALITY,
-            "format": client_info.format or Config.SCREENSHOT_FORMAT,
-            "enable_heartbeat": True,
-            "enable_batch_upload": True,
-        },
-        capabilities=client_info.capabilities or [],
-    )
-
-    db.add(new_client)
-    db.commit()
-    db.refresh(new_client)
-
-    logger.info(f"✨ 新客户端注册成功: {new_client.client_id} -> 员工: {employee_id}")
+    if new_client.hardware_fingerprint:
+        logger.info(f"  硬件指纹: {new_client.hardware_fingerprint[:16]}...")
 
     return new_client
 

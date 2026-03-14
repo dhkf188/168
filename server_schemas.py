@@ -113,6 +113,10 @@ class ClientCreate(ClientBase):
     employee_name: Optional[str] = None
     capabilities: Optional[List[str]] = []
 
+    hardware_fingerprint: Optional[str] = None
+    hardware_parts: Optional[List[str]] = None
+    has_hardware: Optional[bool] = False
+
 
 class Client(ClientBase):
     employee_id: Optional[str] = None

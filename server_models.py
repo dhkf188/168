@@ -225,6 +225,12 @@ class Client(Base):
     last_seen = Column(DateTime(timezone=True), default=func.now(), index=True)
     last_stats = Column(JSON, nullable=True)
 
+    # ===== 新增：硬件指纹字段 =====
+    hardware_fingerprint = Column(String(64), index=True, nullable=True)
+    hardware_parts = Column(JSON, nullable=True)
+    has_hardware = Column(Boolean, default=False)
+    # =============================
+
     config = Column(
         JSON,
         default=lambda: {
@@ -294,6 +300,11 @@ class Client(Base):
             "created_at": (
                 format_beijing_time(self.created_at) if self.created_at else None
             ),
+            # ===== 新增：返回硬件指纹信息 =====
+            "hardware_fingerprint": self.hardware_fingerprint,
+            "hardware_parts": self.hardware_parts,
+            "has_hardware": self.has_hardware,
+            # ================================
         }
 
 
