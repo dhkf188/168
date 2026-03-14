@@ -9,6 +9,7 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from sqlalchemy import text
+from sqlalchemy import func  # 添加这个导入
 
 from server_database import PrimarySessionLocal
 from server_config import Config
@@ -19,6 +20,7 @@ from server_timezone import (
     to_utc_time,
     make_naive,
     make_aware,
+    UTC,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,7 +125,7 @@ class DataCleanup:
         await self.cleanup_old_data()
 
     async def cleanup_old_data(self):
-        """清理旧数据 - 完整优化版"""
+        """清理旧数据 - 修复时区问题"""
         # 使用最新的保留时间
         current_retention = self.retention_hours
 
@@ -132,23 +134,30 @@ class DataCleanup:
             return
 
         try:
-            from server_timezone import get_beijing_now
+            from server_timezone import get_beijing_now, to_utc_time, make_naive
             import json
             from pathlib import Path
 
-            # ===== 使用北京时间作为基准时间 =====
+            # ===== 1. 计算截止时间 =====
             beijing_now = get_beijing_now()
-            cutoff_time = beijing_now - timedelta(hours=current_retention)
+            beijing_cutoff = beijing_now - timedelta(hours=current_retention)
+
+            # 🚨 关键修复：将北京时间截止时间转换为 UTC 用于数据库查询
+            utc_cutoff = to_utc_time(beijing_cutoff)  # 转换为 UTC aware
+            utc_cutoff_naive = make_naive(utc_cutoff)  # 转换为 naive UTC
 
             logger.info(f"🔍 开始清理 {current_retention} 小时前的数据...")
             logger.info(f"📅 当前北京时间: {beijing_now.strftime('%Y-%m-%d %H:%M:%S')}")
-            logger.info(f"⏰ 清理时间界限: {cutoff_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(
+                f"⏰ 北京时间截止: {beijing_cutoff.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            logger.info(f"🕒 UTC截止(naive): {utc_cutoff_naive}")
 
             # 使用数据库会话
             db = PrimarySessionLocal()
 
             try:
-                # ===== 1. 先统计待清理数据 =====
+                # ===== 2. 先统计待清理数据（使用 UTC 时间）=====
                 stats_result = db.execute(
                     text(
                         """
@@ -160,7 +169,7 @@ class DataCleanup:
                         WHERE screenshot_time < :cutoff
                     """
                     ),
-                    {"cutoff": cutoff_time},
+                    {"cutoff": utc_cutoff_naive},  # ✅ 使用 UTC 时间
                 ).first()
 
                 if stats_result:
@@ -177,7 +186,7 @@ class DataCleanup:
                     logger.info(f"   - 总大小: {pending_size/1024/1024:.2f} MB")
                     logger.info(f"   - 缩略图: {thumb_count} 个")
 
-                # ===== 2. 分批获取要删除的记录（避免内存过大）=====
+                # ===== 3. 分批获取要删除的记录 =====
                 batch_size = 100
                 offset = 0
                 total_deleted = 0
@@ -186,7 +195,7 @@ class DataCleanup:
                 failed_files = []
 
                 while True:
-                    # 分批获取
+                    # 分批获取（使用 UTC 时间）
                     screenshots_batch = db.execute(
                         text(
                             """
@@ -197,7 +206,11 @@ class DataCleanup:
                             LIMIT :limit OFFSET :offset
                         """
                         ),
-                        {"cutoff": cutoff_time, "limit": batch_size, "offset": offset},
+                        {
+                            "cutoff": utc_cutoff_naive,  # ✅ 使用 UTC 时间
+                            "limit": batch_size,
+                            "offset": offset,
+                        },
                     ).fetchall()
 
                     if not screenshots_batch:
@@ -207,7 +220,7 @@ class DataCleanup:
                         f"处理批次: {offset} - {offset + len(screenshots_batch)}"
                     )
 
-                    # ===== 3. 删除文件 =====
+                    # ===== 4. 删除文件 =====
                     for screenshot in screenshots_batch:
                         screenshot_id, filename, thumbnail = screenshot
 
@@ -241,7 +254,7 @@ class DataCleanup:
 
                     offset += len(screenshots_batch)
 
-                # ===== 4. 删除数据库记录 =====
+                # ===== 5. 删除数据库记录（使用 UTC 时间）=====
                 result = db.execute(
                     text(
                         """
@@ -250,7 +263,7 @@ class DataCleanup:
                         RETURNING id
                     """
                     ),
-                    {"cutoff": cutoff_time},
+                    {"cutoff": utc_cutoff_naive},  # ✅ 使用 UTC 时间
                 )
 
                 deleted_records = result.fetchall()
@@ -259,7 +272,7 @@ class DataCleanup:
                 # 提交事务
                 db.commit()
 
-                # ===== 5. 记录结果 =====
+                # ===== 6. 记录结果 =====
                 if total_deleted > 0:
                     success_message = (
                         f"✅ 清理完成:\n"
@@ -273,7 +286,7 @@ class DataCleanup:
 
                     logger.info(success_message)
 
-                    # 记录清理活动
+                    # 记录清理活动（使用北京时间记录）
                     try:
                         db.execute(
                             text(
@@ -292,13 +305,13 @@ class DataCleanup:
                                             total_size_freed / (1024 * 1024), 2
                                         ),
                                         "retention_hours": current_retention,
-                                        "cutoff_time": cutoff_time.isoformat(),
+                                        "cutoff_time": beijing_cutoff.isoformat(),  # 记录北京时间
                                         "failed_files": failed_files[:10],
                                         "failed_count": len(failed_files),
                                     },
                                     ensure_ascii=False,
                                 ),
-                                "now": beijing_now,
+                                "now": beijing_now,  # 使用北京时间记录
                             },
                         )
                         db.commit()
@@ -322,3 +335,138 @@ class DataCleanup:
         """停止清理任务"""
         self.running = False
         logger.info("清理任务已停止")
+
+
+# ==================== 🚨 遗漏的 API 接口 ====================
+# 这个函数需要在 server_main.py 中调用，但需要在 server_cleanup.py 中定义
+def get_cleanup_status(db):
+    """
+    获取清理状态 - 修复时区问题
+    这个函数被 server_main.py 中的 /api/cleanup/status 调用
+    """
+    try:
+        from server_timezone import get_beijing_now, to_utc_time, make_naive
+
+        # ===== 1. 获取北京时间 =====
+        beijing_now = get_beijing_now()
+        retention_hours = Config.SCREENSHOT_RETENTION_HOURS
+
+        # ===== 2. 计算截止时间（北京时间）并转换为 UTC =====
+        beijing_cutoff = beijing_now - timedelta(hours=retention_hours)
+        utc_cutoff = to_utc_time(beijing_cutoff)  # 转换为 UTC aware
+        utc_cutoff_naive = make_naive(utc_cutoff)  # 转换为 naive UTC
+
+        logger.debug(f"清理状态计算 - 北京时间: {beijing_now}")
+        logger.debug(f"北京时间截止: {beijing_cutoff}")
+        logger.debug(f"UTC截止(naive): {utc_cutoff_naive}")
+
+        # ===== 3. 查询待清理截图（使用 UTC 时间）=====
+        pending_stats = db.execute(
+            text(
+                """
+                SELECT 
+                    COUNT(*) as record_count, 
+                    COALESCE(SUM(file_size), 0) as total_size
+                FROM screenshots 
+                WHERE screenshot_time < :cutoff
+            """
+            ),
+            {"cutoff": utc_cutoff_naive},  # ✅ 使用 UTC 时间
+        ).first()
+
+        pending_count = pending_stats[0] if pending_stats else 0
+        pending_size = pending_stats[1] if pending_stats else 0
+
+        # ===== 4. 获取总截图数量和大小 =====
+        total_stats = db.execute(
+            text(
+                """
+                SELECT 
+                    COUNT(*) as total_count, 
+                    COALESCE(SUM(file_size), 0) as total_size
+                FROM screenshots
+            """
+            )
+        ).first()
+
+        total_count = total_stats[0] if total_stats else 0
+        total_size = total_stats[1] if total_stats else 0
+
+        # ===== 5. 获取上次清理时间 =====
+        last_cleanup_result = db.execute(
+            text(
+                """
+                SELECT created_at
+                FROM activities 
+                WHERE action = 'auto_cleanup'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """
+            )
+        ).first()
+
+        last_cleanup_time = None
+        if last_cleanup_result and last_cleanup_result[0]:
+            # 数据库存储的是 UTC naive，转换为北京时间显示
+            from server_timezone import to_beijing_time, make_aware
+
+            utc_naive = last_cleanup_result[0]
+            utc_aware = make_aware(utc_naive, UTC)  # 先转换为 UTC aware
+            last_cleanup_time = to_beijing_time(utc_aware)  # 再转换为北京时间
+
+        # ===== 6. 计算下次清理时间 =====
+        next_cleanup_time = None
+        if Config.AUTO_CLEANUP_ENABLED and last_cleanup_time:
+            interval_seconds = Config.CLEANUP_INTERVAL
+            next_cleanup_time = last_cleanup_time + timedelta(seconds=interval_seconds)
+
+        # ===== 7. 计算清理百分比 =====
+        pending_percent = 0
+        if total_size > 0:
+            pending_percent = round((pending_size / total_size) * 100, 2)
+
+        # ===== 8. 返回结果 =====
+        return {
+            # 配置信息
+            "enabled": Config.AUTO_CLEANUP_ENABLED,
+            "retention_hours": retention_hours,
+            "interval_hours": round(Config.CLEANUP_INTERVAL / 3600, 1),
+            "cleanup_time": getattr(Config, "CLEANUP_TIME", None),
+            # 待清理信息
+            "pending_cleanup": pending_count,
+            "pending_size_mb": round(pending_size / (1024 * 1024), 2),
+            "pending_percent": pending_percent,
+            # 总存储信息
+            "total_screenshots": total_count,
+            "total_size_mb": round(total_size / (1024 * 1024), 2),
+            # 时间信息
+            "current_time": beijing_now.isoformat(),
+            "cutoff_time": beijing_cutoff.isoformat(),
+            "last_cleanup": (
+                last_cleanup_time.isoformat() if last_cleanup_time else None
+            ),
+            "next_cleanup": (
+                next_cleanup_time.isoformat() if next_cleanup_time else None
+            ),
+            # 状态信息
+            "has_pending": pending_count > 0,
+            "is_overdue": (
+                next_cleanup_time and beijing_now > next_cleanup_time
+                if next_cleanup_time
+                else False
+            ),
+        }
+
+    except Exception as e:
+        logger.error(f"获取清理状态失败: {str(e)}", exc_info=True)
+        return {
+            "enabled": Config.AUTO_CLEANUP_ENABLED,
+            "retention_hours": Config.SCREENSHOT_RETENTION_HOURS,
+            "interval_hours": Config.CLEANUP_INTERVAL / 3600,
+            "pending_cleanup": 0,
+            "pending_size_mb": 0,
+            "total_screenshots": 0,
+            "total_size_mb": 0,
+            "last_cleanup": None,
+            "error": str(e) if Config.DEBUG else None,
+        }

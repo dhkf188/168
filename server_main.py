@@ -2279,63 +2279,92 @@ def get_stats(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user),
 ):
-    """获取系统统计信息"""
+    """获取系统统计信息 - 修复时区问题"""
 
-    # ===== 使用工具函数获取北京时间 =====
+    from server_timezone import (
+        get_beijing_now,
+        to_utc_time,
+        make_naive,
+        to_beijing_time,
+        get_date_range_for_day,
+    )
+    from sqlalchemy import func
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # ===== 1. 获取北京时间作为基准 =====
     beijing_now = get_beijing_now()
+    logger.debug(f"统计计算 - 北京时间: {beijing_now}")
 
-    # 🚨 修复：直接使用datetime，不转换为date
-    today_start, today_end = get_date_range_for_day(beijing_now)
+    # ===== 2. 获取今日范围（北京时间）并转换为 UTC =====
+    today_start_beijing, today_end_beijing = get_date_range_for_day(beijing_now)
 
-    # 昨日 - 直接用datetime计算
+    # 🚨 关键修复：将北京时间范围转换为 UTC 用于数据库查询
+    today_start_utc = make_naive(to_utc_time(today_start_beijing))
+    today_end_utc = make_naive(to_utc_time(today_end_beijing))
+
+    logger.debug(f"今日范围 - 北京时间: {today_start_beijing} ~ {today_end_beijing}")
+    logger.debug(f"今日范围 - UTC: {today_start_utc} ~ {today_end_utc}")
+
+    # ===== 3. 昨日范围 =====
     yesterday = beijing_now - timedelta(days=1)
-    yesterday_start, yesterday_end = get_date_range_for_day(yesterday)
+    yesterday_start_beijing, yesterday_end_beijing = get_date_range_for_day(yesterday)
 
-    # 本周开始（7天前）
-    week_ago = beijing_now - timedelta(days=7)
+    yesterday_start_utc = make_naive(to_utc_time(yesterday_start_beijing))
+    yesterday_end_utc = make_naive(to_utc_time(yesterday_end_beijing))
 
-    # 今日截图
+    # ===== 4. 本周范围（7天前）=====
+    week_ago_beijing = beijing_now - timedelta(days=7)
+    week_ago_utc = make_naive(to_utc_time(week_ago_beijing))
+
+    # ===== 5. 在线客户端阈值 =====
+    online_threshold_beijing = beijing_now - timedelta(minutes=10)
+    online_threshold_utc = make_naive(to_utc_time(online_threshold_beijing))
+
+    # ===== 6. 今日截图（使用 UTC 时间）=====
     today_count = (
         db.query(models.Screenshot)
         .filter(
-            models.Screenshot.screenshot_time >= today_start,
-            models.Screenshot.screenshot_time < today_end,
+            models.Screenshot.screenshot_time >= today_start_utc,
+            models.Screenshot.screenshot_time < today_end_utc,
         )
         .count()
     )
 
-    # 昨日截图
+    # ===== 7. 昨日截图（使用 UTC 时间）=====
     yesterday_count = (
         db.query(models.Screenshot)
         .filter(
-            models.Screenshot.screenshot_time >= yesterday_start,
-            models.Screenshot.screenshot_time < yesterday_end,
+            models.Screenshot.screenshot_time >= yesterday_start_utc,
+            models.Screenshot.screenshot_time < yesterday_end_utc,
         )
         .count()
     )
 
-    # 本周截图（过去7天）
+    # ===== 8. 本周截图（使用 UTC 时间）=====
     week_count = (
         db.query(models.Screenshot)
-        .filter(models.Screenshot.screenshot_time >= week_ago)
+        .filter(models.Screenshot.screenshot_time >= week_ago_utc)
         .count()
     )
 
-    # 在线客户端 - 判断最后在线时间是否在最近10分钟内
-    cutoff = beijing_now - timedelta(minutes=10)
+    # ===== 9. 在线客户端（使用 UTC 时间）=====
     online_clients = (
-        db.query(models.Client).filter(models.Client.last_seen >= cutoff).count()
+        db.query(models.Client)
+        .filter(models.Client.last_seen >= online_threshold_utc)
+        .count()
     )
 
-    # 总数（这些不受时间影响）
+    # ===== 10. 总数（不受时间影响）=====
     total_screenshots = db.query(models.Screenshot).count()
     total_employees = db.query(models.Employee).count()
     total_clients = db.query(models.Client).count()
 
-    # 存储大小
+    # ===== 11. 存储大小 =====
     total_size = db.query(func.sum(models.Screenshot.file_size)).scalar() or 0
 
-    # 各格式统计
+    # ===== 12. 各格式统计 =====
     webp_count = (
         db.query(models.Screenshot)
         .filter(models.Screenshot.image_format == "webp")
@@ -2347,22 +2376,29 @@ def get_stats(
         .count()
     )
 
-    # 每小时活动（使用北京时间）
+    # ===== 13. 每小时活动（使用 UTC 时间）=====
     hourly = []
     for i in range(24):
-        start = beijing_now.replace(hour=i, minute=0, second=0, microsecond=0)
-        end = start + timedelta(hours=1)
+        # 北京时间的小时，转换为 UTC 时间范围
+        hour_start_beijing = beijing_now.replace(
+            hour=i, minute=0, second=0, microsecond=0
+        )
+        hour_end_beijing = hour_start_beijing + timedelta(hours=1)
+
+        hour_start_utc = make_naive(to_utc_time(hour_start_beijing))
+        hour_end_utc = make_naive(to_utc_time(hour_end_beijing))
+
         count = (
             db.query(models.Screenshot)
             .filter(
-                models.Screenshot.screenshot_time >= start,
-                models.Screenshot.screenshot_time < end,
+                models.Screenshot.screenshot_time >= hour_start_utc,
+                models.Screenshot.screenshot_time < hour_end_utc,
             )
             .count()
         )
         hourly.append(count)
 
-    # 最近活动
+    # ===== 14. 最近活动 =====
     recent_activities = (
         db.query(models.Activity)
         .order_by(models.Activity.created_at.desc())
@@ -2370,7 +2406,7 @@ def get_stats(
         .all()
     )
 
-    # 各员工截图统计
+    # ===== 15. 各员工截图统计（使用 UTC 时间）=====
     top_employees = []
     employees = db.query(models.Employee).limit(5).all()
     for emp in employees:
@@ -2378,8 +2414,8 @@ def get_stats(
             db.query(models.Screenshot)
             .filter(
                 models.Screenshot.employee_id == emp.employee_id,
-                models.Screenshot.screenshot_time >= today_start,
-                models.Screenshot.screenshot_time < today_end,
+                models.Screenshot.screenshot_time >= today_start_utc,
+                models.Screenshot.screenshot_time < today_end_utc,
             )
             .count()
         )
@@ -2398,6 +2434,12 @@ def get_stats(
                 "total": total_emp,
             }
         )
+
+    logger.info(f"统计结果:")
+    logger.info(f"  今日截图: {today_count}")
+    logger.info(f"  昨日截图: {yesterday_count}")
+    logger.info(f"  在线客户端: {online_clients}")
+    logger.info(f"  总截图: {total_screenshots}")
 
     return {
         "today": today_count,
@@ -2484,22 +2526,39 @@ def get_cleanup_status(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user),
 ):
-    """获取清理状态 - 优化版"""
+    """获取清理状态 - 修复时区问题"""
 
-    from server_timezone import get_beijing_now, to_beijing_time
+    from server_timezone import (
+        get_beijing_now,
+        to_utc_time,
+        make_naive,
+        to_beijing_time,
+        make_aware,
+        UTC,
+    )
     from sqlalchemy import func
+    import logging
 
     logger = logging.getLogger(__name__)
 
     try:
-        # ===== 使用北京时间计算待清理的数据 =====
+        # ===== 1. 获取北京时间 =====
         beijing_now = get_beijing_now()
-        cutoff = beijing_now - timedelta(hours=Config.SCREENSHOT_RETENTION_HOURS)
+        retention_hours = Config.SCREENSHOT_RETENTION_HOURS
 
-        logger.info(f"清理状态计算 - 北京时间: {beijing_now}, 截止: {cutoff}")
+        # ===== 2. 计算北京时间截止时间 =====
+        beijing_cutoff = beijing_now - timedelta(hours=retention_hours)
 
-        # ===== 优化：一次查询获取数量和总和 =====
-        # 使用子查询或直接查询
+        # 🚨 关键修复：将北京时间截止时间转换为 UTC 用于数据库查询
+        utc_cutoff = to_utc_time(beijing_cutoff)  # 转换为 UTC aware
+        utc_cutoff_naive = make_naive(utc_cutoff)  # 转换为 naive UTC
+
+        logger.info(f"清理状态计算:")
+        logger.info(f"  北京时间: {beijing_now}")
+        logger.info(f"  北京时间截止: {beijing_cutoff}")
+        logger.info(f"  UTC截止(naive): {utc_cutoff_naive}")
+
+        # ===== 3. 查询待清理截图（使用 UTC 时间）=====
         pending_stats = (
             db.query(
                 func.count(models.Screenshot.id).label("count"),
@@ -2507,7 +2566,9 @@ def get_cleanup_status(
                     "total_size"
                 ),
             )
-            .filter(models.Screenshot.screenshot_time < cutoff)
+            .filter(
+                models.Screenshot.screenshot_time < utc_cutoff_naive
+            )  # ✅ 使用 UTC 时间
             .first()
         )
 
@@ -2516,39 +2577,7 @@ def get_cleanup_status(
 
         logger.info(f"待清理截图: {pending_count}张, {pending_size/1024/1024:.2f}MB")
 
-        # ===== 获取上次清理时间 =====
-        last_cleanup = (
-            db.query(models.Activity)
-            .filter(models.Activity.action == "auto_cleanup")
-            .order_by(models.Activity.created_at.desc())
-            .first()
-        )
-
-        # 转换上次清理时间为北京时间（如果数据库存的是UTC）
-        last_cleanup_time = None
-        if last_cleanup and last_cleanup.created_at:
-            # 假设数据库存储的是UTC，转换为北京时间
-            last_cleanup_time = to_beijing_time(last_cleanup.created_at)
-            logger.debug(
-                f"上次清理时间(UTC): {last_cleanup.created_at}, (北京): {last_cleanup_time}"
-            )
-
-        # ===== 获取清理配置 =====
-        cleanup_interval = getattr(Config, "CLEANUP_INTERVAL", 21600)  # 默认6小时
-        interval_hours = cleanup_interval / 3600 if cleanup_interval else 6
-
-        # ===== 计算下次清理时间 =====
-        next_cleanup_time = None
-        if Config.AUTO_CLEANUP_ENABLED and last_cleanup_time:
-            # 下次清理时间 = 上次清理时间 + 间隔
-            next_cleanup_time = last_cleanup_time + timedelta(seconds=cleanup_interval)
-            logger.debug(f"下次清理时间: {next_cleanup_time}")
-
-        # ===== 获取清理时间段配置 =====
-        cleanup_time = getattr(Config, "CLEANUP_TIME", None)
-
-        # ===== 计算存储统计 =====
-        # 获取总截图数量和大小
+        # ===== 4. 获取总截图数量和大小 =====
         total_stats = db.query(
             func.count(models.Screenshot.id).label("total_count"),
             func.coalesce(func.sum(models.Screenshot.file_size), 0).label("total_size"),
@@ -2557,17 +2586,45 @@ def get_cleanup_status(
         total_count = total_stats.total_count if total_stats else 0
         total_size = total_stats.total_size if total_stats else 0
 
-        # 计算已用存储百分比
+        # ===== 5. 获取上次清理时间 =====
+        last_cleanup = (
+            db.query(models.Activity)
+            .filter(models.Activity.action == "auto_cleanup")
+            .order_by(models.Activity.created_at.desc())
+            .first()
+        )
+
+        last_cleanup_time = None
+        if last_cleanup and last_cleanup.created_at:
+            # 数据库存储的是 UTC naive，转换为北京时间显示
+            utc_naive = last_cleanup.created_at
+            utc_aware = make_aware(utc_naive, UTC)  # 先转换为 UTC aware
+            last_cleanup_time = to_beijing_time(utc_aware)  # 再转换为北京时间
+            logger.debug(f"上次清理时间(UTC): {utc_naive}, (北京): {last_cleanup_time}")
+
+        # ===== 6. 获取清理配置 =====
+        cleanup_interval = getattr(Config, "CLEANUP_INTERVAL", 21600)  # 默认6小时
+        interval_hours = cleanup_interval / 3600 if cleanup_interval else 6
+
+        # ===== 7. 计算下次清理时间 =====
+        next_cleanup_time = None
+        if Config.AUTO_CLEANUP_ENABLED and last_cleanup_time:
+            next_cleanup_time = last_cleanup_time + timedelta(seconds=cleanup_interval)
+            logger.debug(f"下次清理时间: {next_cleanup_time}")
+
+        # ===== 8. 获取清理时间段配置 =====
+        cleanup_time = getattr(Config, "CLEANUP_TIME", None)
+
+        # ===== 9. 计算已用存储百分比 =====
         storage_used_percent = 0
         if total_size > 0:
-            storage_used_percent = (
-                round((pending_size / total_size) * 100, 2) if total_size > 0 else 0
-            )
+            storage_used_percent = round((pending_size / total_size) * 100, 2)
 
+        # ===== 10. 返回结果 =====
         return {
             # 配置信息
             "enabled": Config.AUTO_CLEANUP_ENABLED,
-            "retention_hours": Config.SCREENSHOT_RETENTION_HOURS,
+            "retention_hours": retention_hours,
             "interval_hours": round(interval_hours, 1),
             "cleanup_time": cleanup_time,
             # 待清理信息
@@ -2579,7 +2636,7 @@ def get_cleanup_status(
             "total_size_mb": round(total_size / (1024 * 1024), 2),
             # 时间信息
             "current_time": beijing_now.isoformat(),
-            "cutoff_time": cutoff.isoformat(),
+            "cutoff_time": beijing_cutoff.isoformat(),  # 返回北京时间给前端显示
             "last_cleanup": (
                 last_cleanup_time.isoformat() if last_cleanup_time else None
             ),
@@ -2605,6 +2662,8 @@ def get_cleanup_status(
             "interval_hours": getattr(Config, "CLEANUP_INTERVAL", 21600) / 3600,
             "pending_cleanup": 0,
             "pending_size_mb": 0,
+            "total_screenshots": 0,
+            "total_size_mb": 0,
             "last_cleanup": None,
             "error": str(e) if Config.DEBUG else "获取状态失败",
         }

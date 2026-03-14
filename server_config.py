@@ -122,7 +122,7 @@ class Config:
     def SCREENSHOT_RETENTION_HOURS(cls):
         """截图保留时间（小时）"""
         return cls._get_db_config(
-            "screenshot_retention_hours", "SCREENSHOT_RETENTION_HOURS", "4", int
+            "screenshot_retention_hours", "SCREENSHOT_RETENTION_HOURS", "48", int
         )
 
     @classmethod

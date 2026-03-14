@@ -4,8 +4,7 @@
       <template #header>
         <div class="login-header">
           <el-icon :size="48"><Camera /></el-icon>
-          <h2>员工监控系统</h2>
-          <p class="subtitle">企业级员工行为管理系统</p>
+          <h2>DHPG监控系统</h2>
         </div>
       </template>
 
@@ -49,16 +48,12 @@
             登录系统
           </el-button>
         </el-form-item>
-
-        <div class="login-footer">
-          <span class="demo-info">默认账号: admin / Admin@123456</span>
-        </div>
       </el-form>
     </el-card>
 
     <div class="version">
       <el-icon><InfoFilled /></el-icon>
-      版本 3.0.0 | 企业版
+      DHPG监控系统 | 版本 1.0.0
     </div>
   </div>
 </template>
