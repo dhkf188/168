@@ -54,7 +54,7 @@
 
     <div class="version">
       <el-icon><InfoFilled /></el-icon>
-      DHPG监控系统 | 版本 1.0.0
+      DHPG监控系统 | 版本 4.0.1
     </div>
   </div>
 </template>

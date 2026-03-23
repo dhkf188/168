@@ -110,6 +110,21 @@ export function formatFileSize(size) {
   return `${fileSize.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+export function formatDuration(seconds) {
+  if (!seconds || seconds < 0) return "0秒";
+
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+
+  const parts = [];
+  if (hours > 0) parts.push(`${hours}小时`);
+  if (minutes > 0) parts.push(`${minutes}分钟`);
+  if (secs > 0 && hours === 0) parts.push(`${secs}秒`);
+
+  return parts.join("") || "0秒";
+}
+
 /**
  * 获取当前北京时间（调试用）
  */
@@ -126,4 +141,5 @@ export default {
   getHour,
   formatFileSize,
   getCurrentBeijingTime,
+  formatDuration,
 };

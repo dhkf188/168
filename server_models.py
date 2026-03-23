@@ -39,6 +39,7 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_login = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, default=True)
+    password_changed_at = Column(DateTime(timezone=True), nullable=True)  # 新增字段
 
     def to_dict(self):
         return {
@@ -48,6 +49,11 @@ class User(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_login": self.last_login.isoformat() if self.last_login else None,
             "is_active": self.is_active,
+            "password_changed_at": (
+                self.password_changed_at.isoformat()
+                if self.password_changed_at
+                else None
+            ),
         }
 
 
@@ -231,6 +237,12 @@ class Client(Base):
     has_hardware = Column(Boolean, default=False)
     # =============================
 
+    first_seen = Column(DateTime(timezone=True), nullable=True)  # 首次注册时间
+    fingerprint_history = Column(JSON, default=[])  # 硬件指纹历史
+    ip_history = Column(JSON, default=[])  # IP历史
+    review_flags = Column(JSON, default=[])  # 审核标记
+    client_metadata = Column(JSON, default={})
+
     config = Column(
         JSON,
         default=lambda: {
@@ -239,6 +251,21 @@ class Client(Base):
             "format": Config.SCREENSHOT_FORMAT,
             "enable_heartbeat": True,
             "enable_batch_upload": True,
+        },
+    )
+
+    enable_remote_screen = Column(Boolean, default=True)  # 是否允许远程查看
+    remote_screen_settings = Column(
+        JSON,
+        default={
+            "max_fps": 10,
+            "min_fps": 1,
+            "max_quality": 95,
+            "min_quality": 30,
+            "enable_diff": True,
+            "enable_region": True,
+            "enable_h264": True,
+            "enable_qr": False,
         },
     )
 
@@ -300,11 +327,13 @@ class Client(Base):
             "created_at": (
                 format_beijing_time(self.created_at) if self.created_at else None
             ),
-            # ===== 新增：返回硬件指纹信息 =====
             "hardware_fingerprint": self.hardware_fingerprint,
             "hardware_parts": self.hardware_parts,
             "has_hardware": self.has_hardware,
-            # ================================
+            "client_metadata": self.client_metadata,
+            "first_seen": (
+                format_beijing_time(self.first_seen) if self.first_seen else None
+            ),
         }
 
 
@@ -471,3 +500,227 @@ class SystemConfig(Base):
             "category": self.category,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+# server_models.py - 添加 Notification 模型
+
+
+class Notification(Base):
+    """通知表"""
+
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title = Column(String(200), nullable=False)
+    content = Column(String(1000), nullable=True)
+    type = Column(String(50), default="info")  # info, success, warning, error
+    category = Column(String(50), default="system")  # system, client, cleanup, backup
+    is_read = Column(Boolean, default=False)
+    is_deleted = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    read_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+
+    # 关联字段
+    related_id = Column(
+        String(100), nullable=True
+    )  # 关联的业务ID（如客户端ID、截图ID等）
+    related_type = Column(String(50), nullable=True)  # 关联类型
+
+    # 动作链接
+    action_url = Column(String(500), nullable=True)
+    action_text = Column(String(100), nullable=True)
+
+    # 关联
+    user = relationship("User")
+
+    def to_dict(self):
+        """转换为字典"""
+        from server_timezone import format_beijing_time
+
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "title": self.title,
+            "content": self.content,
+            "type": self.type,
+            "category": self.category,
+            "is_read": self.is_read,
+            "read": self.is_read,  # 兼容前端字段名
+            "created_at": format_beijing_time(self.created_at),
+            "read_at": format_beijing_time(self.read_at) if self.read_at else None,
+            "related_id": self.related_id,
+            "related_type": self.related_type,
+            "action": (
+                {"url": self.action_url, "text": self.action_text}
+                if self.action_url
+                else None
+            ),
+        }
+
+
+# ==================== 浏览器历史记录表 ====================
+class BrowserHistory(Base):
+    """浏览器历史记录"""
+
+    __tablename__ = "browser_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(
+        String(100),
+        ForeignKey("employees.employee_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    client_id = Column(
+        String(64), ForeignKey("clients.client_id", ondelete="SET NULL"), nullable=True
+    )
+    url = Column(String(5000), nullable=False)
+    title = Column(String(2000))
+    browser = Column(String(50))  # chrome, firefox, edge
+    duration = Column(Integer, default=0)  # 停留时间（秒）
+    visit_time = Column(DateTime(timezone=True), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # 关联
+    employee = relationship("Employee", backref="browser_history")
+    client = relationship("Client", backref="browser_history")
+
+    def to_dict(self):
+        from server_timezone import format_beijing_time
+
+        return {
+            "id": self.id,
+            "employee_id": self.employee_id,
+            "client_id": self.client_id,
+            "url": self.url[:200] + "..." if len(self.url) > 200 else self.url,
+            "full_url": self.url,
+            "title": self.title,
+            "browser": self.browser,
+            "duration": self.duration,
+            "duration_str": f"{self.duration//60}分{self.duration%60}秒",
+            "visit_time": format_beijing_time(self.visit_time),
+            "created_at": format_beijing_time(self.created_at),
+        }
+
+
+# ==================== 软件使用记录表 ====================
+class AppUsage(Base):
+    """软件使用记录"""
+
+    __tablename__ = "app_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(
+        String(100),
+        ForeignKey("employees.employee_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    client_id = Column(
+        String(64), ForeignKey("clients.client_id", ondelete="SET NULL"), nullable=True
+    )
+    app_name = Column(String(200), nullable=False)
+    app_path = Column(String(500))
+    window_title = Column(String(500))
+    start_time = Column(DateTime(timezone=True), nullable=False)
+    end_time = Column(DateTime(timezone=True))
+    duration = Column(Integer, default=0)  # 使用时长（秒）
+    is_foreground = Column(Boolean, default=False)  # 是否前台应用
+    cpu_avg = Column(Integer, default=0)  # 平均CPU使用率
+    memory_avg = Column(Integer, default=0)  # 平均内存使用(MB)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # 关联
+    employee = relationship("Employee", backref="app_usage")
+    client = relationship("Client", backref="app_usage")
+
+    def to_dict(self):
+        from server_timezone import format_beijing_time
+
+        return {
+            "id": self.id,
+            "employee_id": self.employee_id,
+            "client_id": self.client_id,
+            "app_name": self.app_name,
+            "app_path": self.app_path,
+            "window_title": self.window_title,
+            "start_time": format_beijing_time(self.start_time),
+            "end_time": format_beijing_time(self.end_time) if self.end_time else None,
+            "duration": self.duration,
+            "duration_str": f"{self.duration//60}分{self.duration%60}秒",
+            "is_foreground": self.is_foreground,
+            "cpu_avg": self.cpu_avg,
+            "memory_avg": self.memory_avg,
+        }
+
+
+# ==================== 文件操作记录表 ====================
+class FileOperation(Base):
+    """文件操作记录"""
+
+    __tablename__ = "file_operations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(
+        String(100),
+        ForeignKey("employees.employee_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    client_id = Column(
+        String(64), ForeignKey("clients.client_id", ondelete="SET NULL"), nullable=True
+    )
+    operation = Column(String(20), nullable=False)  # create, modify, delete, rename
+    file_path = Column(String(1000), nullable=False)
+    file_name = Column(String(500))
+    file_size = Column(BigInteger, default=0)
+    file_type = Column(String(50))  # 文件扩展名
+    is_directory = Column(Boolean, default=False)
+    operation_time = Column(DateTime(timezone=True), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # 关联
+    employee = relationship("Employee", backref="file_operations")
+    client = relationship("Client", backref="file_operations")
+
+    def to_dict(self):
+        from server_timezone import format_beijing_time
+
+        return {
+            "id": self.id,
+            "employee_id": self.employee_id,
+            "client_id": self.client_id,
+            "operation": self.operation,
+            "operation_cn": self._get_operation_cn(self.operation),
+            "file_path": self.file_path,
+            "file_name": self.file_name,
+            "file_size": self.file_size,
+            "file_size_str": self._format_size(self.file_size),
+            "file_type": self.file_type,
+            "is_directory": self.is_directory,
+            "operation_time": format_beijing_time(self.operation_time),
+        }
+
+    @staticmethod
+    def _format_size(size):
+        for unit in ["B", "KB", "MB"]:
+            if size < 1024:
+                return f"{size:.1f}{unit}"
+            size /= 1024
+        return f"{size:.1f}GB"
+
+    @staticmethod
+    def _get_operation_cn(op):
+        ops = {
+            "create": "创建",
+            "modify": "修改",
+            "delete": "删除",
+            "rename": "重命名",
+            "move": "移动",
+            "copy": "复制",
+        }
+        return ops.get(op, op)

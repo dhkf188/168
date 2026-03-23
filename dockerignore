@@ -1,0 +1,51 @@
+# .dockerignore
+# 版本控制
+.git
+.gitignore
+.github
+
+# 依赖目录
+node_modules
+venv
+.venv
+env
+ENV
+env.bak
+venv.bak
+__pycache__
+*.pyc
+
+# 本地文件
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# 构建产物
+dist
+build
+*.tgz
+*.tar.gz
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+*.bak
+
+# 测试
+tests
+coverage
+*.test.js
+*.spec.js
+
+# 文档
+README.md
+docs
+*.md

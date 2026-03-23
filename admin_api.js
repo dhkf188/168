@@ -17,7 +17,21 @@ api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem("token");
     if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
+      // 检查是否已经存在 Authorization 头
+      const existingAuth = config.headers.Authorization;
+      if (!existingAuth) {
+        // 如果没有，才添加
+        config.headers.Authorization = `Bearer ${token}`;
+        console.log(
+          `📡 请求: ${config.method.toUpperCase()} ${config.url}`,
+          "已添加token",
+        );
+      } else {
+        console.log(
+          `📡 请求: ${config.method.toUpperCase()} ${config.url}`,
+          "已有token，跳过",
+        );
+      }
     }
     return config;
   },
@@ -205,6 +219,102 @@ export const cleanupApi = {
 
   getCleanupStatus() {
     return api.get("/cleanup/status");
+  },
+};
+
+// ==================== 通知相关API（新增）====================
+export const notificationApi = {
+  async getNotifications(params = {}) {
+    const response = await api.get("/notifications", { params });
+    return normalizeListResponse(response);
+  },
+
+  async getUnreadCount() {
+    const response = await api.get("/notifications/unread/count");
+    return response;
+  },
+
+  async markAsRead(id) {
+    return api.put(`/notifications/${id}/read`);
+  },
+
+  async markAllAsRead() {
+    return api.put("/notifications/read-all");
+  },
+
+  async deleteNotification(id) {
+    return api.delete(`/notifications/${id}`);
+  },
+
+  async clearAll() {
+    return api.delete("/notifications/clear-all");
+  },
+
+  async batchDelete(ids) {
+    return api.post("/notifications/batch-delete", { ids });
+  },
+
+  async batchMarkAsRead(ids) {
+    return api.post("/notifications/batch-read", { ids });
+  },
+};
+// ==================== 浏览器历史API ====================
+export const browserApi = {
+  // 上传浏览器历史（客户端用）
+  async uploadHistory(data) {
+    return api.post("/browser/history", data);
+  },
+
+  // 获取浏览器历史
+  async getHistory(params = {}) {
+    const response = await api.get("/browser/history", { params });
+    return normalizeListResponse(response);
+  },
+
+  // 获取浏览器统计
+  async getStats(params = {}) {
+    const response = await api.get("/browser/stats", { params });
+    return response;
+  },
+};
+
+// ==================== 软件使用API ====================
+export const appApi = {
+  // 上传软件使用（客户端用）
+  async uploadUsage(data) {
+    return api.post("/apps/usage", data);
+  },
+
+  // 获取软件使用记录
+  async getUsage(params = {}) {
+    const response = await api.get("/apps/usage", { params });
+    return normalizeListResponse(response);
+  },
+
+  // 获取软件统计
+  async getStats(params = {}) {
+    const response = await api.get("/apps/stats", { params });
+    return response;
+  },
+};
+
+// ==================== 文件操作API ====================
+export const fileApi = {
+  // 上传文件操作（客户端用）
+  async uploadOperations(data) {
+    return api.post("/files/operations", data);
+  },
+
+  // 获取文件操作记录
+  async getOperations(params = {}) {
+    const response = await api.get("/files/operations", { params });
+    return normalizeListResponse(response);
+  },
+
+  // 获取文件统计
+  async getStats(params = {}) {
+    const response = await api.get("/files/stats", { params });
+    return response;
   },
 };
 

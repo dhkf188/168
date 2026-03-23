@@ -6,8 +6,17 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:8000",
-      "/screenshots": "http://localhost:8000",
+      // 代理 API 请求到后端
+      "/api": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      // 代理远程屏幕 WebSocket
+      "/api/remote/ws": {
+        target: "ws://localhost:8000",
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
 });

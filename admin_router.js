@@ -40,6 +40,26 @@ const routes = [
         component: () => import("./admin_Clients.vue"),
         meta: { title: "客户端管理" },
       },
+      // ===== 新增三个路由 =====
+      {
+        path: "browser",
+        name: "Browser",
+        component: () => import("./admin_Browser.vue"),
+        meta: { title: "浏览历史" },
+      },
+      {
+        path: "apps",
+        name: "Apps",
+        component: () => import("./admin_Apps.vue"),
+        meta: { title: "软件统计" },
+      },
+      {
+        path: "files",
+        name: "Files",
+        component: () => import("./admin_Files.vue"),
+        meta: { title: "文件监控" },
+      },
+      // =====================
       {
         path: "stats",
         name: "Stats",
@@ -51,6 +71,18 @@ const routes = [
         name: "Settings",
         component: () => import("./admin_Settings.vue"),
         meta: { title: "系统设置" },
+      },
+      {
+        path: "remote",
+        name: "RemoteScreen",
+        component: () => import("./admin_RemoteScreen.vue"),
+        meta: { title: "远程屏幕" },
+      },
+      {
+        path: "notifications",
+        name: "Notifications",
+        component: () => import("./admin_Notifications.vue"),
+        meta: { title: "通知中心" },
       },
     ],
   },

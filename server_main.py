@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-员工监控系统服务器 - FastAPI完整增强版
-功能：
-1. 多数据库支持（主备切换）
-2. 自动清理线程
-3. 客户端自动注册
-4. 截图管理
-5. 统计报表
-6. 健康检查
-7. 备份支持
-"""
-
 from fastapi import (
     FastAPI,
     File,
@@ -42,6 +29,8 @@ from sqlalchemy import exists, and_, or_, select
 from sqlalchemy.orm import selectinload
 import mimetypes
 from pathlib import Path
+from server_remote_screen import router as remote_screen_router
+from server_remote_screen import session_manager
 
 import server_models as models
 import server_schemas as schemas
@@ -70,6 +59,8 @@ from server_timezone import (
     BEIJING_TZ,
     UTC,
 )
+from server_notification import NotificationService
+import server_schemas as schemas
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -248,6 +239,13 @@ async def startup_event():
     logger.info("🧹 启动清理任务...")
     asyncio.create_task(cleanup.start_cleanup_task())
     logger.info("✅ 清理任务已启动")
+
+    logger.info("=" * 50)
+    logger.info("🖥️ 启动远程屏幕服务...")
+    from server_remote_screen import start_remote_service
+
+    await start_remote_service()
+    logger.info("✅ 远程屏幕服务已启动")
 
     # ===== 3. 文件系统检查（优化版） =====
     logger.info("=" * 50)
@@ -485,10 +483,100 @@ async def startup_event():
     logger.info("✅ 服务器启动完成!")
     logger.info("=" * 50)
 
+    # ===== 7. 创建通知表（如果不存在）和示例通知 =====
+    logger.info("=" * 50)
+    logger.info("📨 通知系统初始化:")
+
+    db = None
+    try:
+        db = next(get_db())
+
+        # 检查通知表是否存在，如果不存在则创建
+        from sqlalchemy import inspect
+
+        inspector = inspect(db.bind)
+        if "notifications" not in inspector.get_table_names():
+            logger.info("   📋 创建通知表...")
+            # 这里不需要手动创建表，SQLAlchemy 会在启动时自动创建
+            # 但我们可以记录一下
+            logger.info("   ✅ 通知表将由 SQLAlchemy 自动创建")
+
+        # 统计通知数量
+        notification_count = db.query(models.Notification).count()
+        logger.info(f"   📊 现有通知数: {notification_count}")
+
+        # 只在调试模式和没有通知时创建示例通知
+        if notification_count == 0 and Config.DEBUG:
+            logger.info("   ✨ 创建示例通知...")
+
+            # 获取管理员用户
+            admin = (
+                db.query(models.User)
+                .filter(models.User.username == Config.ADMIN_USERNAME)
+                .first()
+            )
+
+            if admin:
+                from server_notification import NotificationService
+
+                # 欢迎通知
+                NotificationService.create_notification(
+                    db=db,
+                    user_id=admin.id,
+                    title="欢迎使用监控系统",
+                    content="感谢您使用员工监控系统，所有功能已就绪",
+                    type="info",
+                    category="system",
+                )
+
+                # 系统状态通知
+                NotificationService.create_notification(
+                    db=db,
+                    user_id=admin.id,
+                    title="系统状态正常",
+                    content=f"存储路径: {STORAGE_PATH}\n自动清理: {'已启用' if Config.AUTO_CLEANUP_ENABLED else '已禁用'}",
+                    type="success",
+                    category="system",
+                )
+
+                # 示例客户端注册通知
+                NotificationService.create_notification(
+                    db=db,
+                    user_id=admin.id,
+                    title="新客户端注册示例",
+                    content="当有新客户端注册时，您会在这里收到通知",
+                    type="info",
+                    category="client",
+                    action_url="/clients",
+                    action_text="查看客户端",
+                )
+
+                logger.info(f"   ✅ 已创建 3 条示例通知")
+            else:
+                logger.warning("   ⚠️ 未找到管理员用户，跳过示例通知创建")
+
+        # 清理过期通知（每天启动时清理一次）
+        if notification_count > 0:
+            from server_notification import NotificationService
+
+            expired_count = NotificationService.cleanup_expired(db)
+            if expired_count > 0:
+                logger.info(f"   🧹 已清理 {expired_count} 条过期通知")
+
+    except Exception as e:
+        logger.error(f"   ❌ 通知系统初始化失败: {e}")
+        logger.debug(f"      错误详情: {str(e)}")
+    finally:
+        if db:
+            db.close()
+            logger.info("   ✅ 数据库连接已关闭")
+
+    logger.info("=" * 50)
+    logger.info("✅ 服务器启动完成!")
+    logger.info("=" * 50)
+
 
 # ==================== 健康检查 ====================
-
-
 @app.get("/health", tags=["系统"])
 async def health_check():
     """系统健康检查"""
@@ -507,10 +595,13 @@ async def health_check():
         },
     }
 
+    # 导入 text
+    from sqlalchemy import text
+
     # 检查主数据库
     try:
         db = next(get_db())
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))  # ✅ 修改：用 text() 包裹
         db.close()
         health_status["database"] = "healthy"
     except Exception as e:
@@ -521,7 +612,7 @@ async def health_check():
     if Config.BACKUP_DATABASE_URL:
         try:
             backup_db = next(get_backup_db())
-            backup_db.execute("SELECT 1")
+            backup_db.execute(text("SELECT 1"))  # ✅ 修改：用 text() 包裹
             backup_db.close()
             health_status["backup_database"] = "healthy"
         except Exception as e:
@@ -901,66 +992,39 @@ async def register_client(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """客户端注册 - 增强硬件识别版"""
-
+    """客户端注册 - 强隔离优化版"""
     beijing_now = get_beijing_now()
-
     logger.info("=" * 50)
-    logger.info("📝 收到客户端注册请求")
     logger.info(
-        f"客户端信息: {json.dumps(client_info.dict(exclude_none=True), indent=2, ensure_ascii=False)}"
+        f"📝 收到注册请求: {client_info.computer_name} ({client_info.windows_user})"
     )
 
     employee_name = getattr(client_info, "employee_name", None)
 
-    # ===== 1. 多重硬件查找（新增硬件指纹优先）=====
+    # ===== 1. 优化后的查找优先级 =====
     existing_client = None
     client_found_by = None
 
-    # 优先级0: 硬件指纹（最精确）
-    if client_info.hardware_fingerprint:
-        existing_client = (
-            db.query(models.Client)
-            .filter(
-                models.Client.hardware_fingerprint == client_info.hardware_fingerprint
+    # 优先级顺序：硬件指纹 > MAC地址 > 硬盘序列号 > client_id
+    search_priorities = [
+        ("hardware_fingerprint", client_info.hardware_fingerprint),  # 最精确
+        ("mac_address", client_info.mac_address),  # 稳定
+        ("disk_serial", client_info.disk_serial),  # 较稳定
+        ("client_id", client_info.client_id),  # 最后考虑
+    ]
+
+    for field_name, value in search_priorities:
+        if value:
+            existing_client = (
+                db.query(models.Client)
+                .filter(getattr(models.Client, field_name) == value)
+                .first()
             )
-            .first()
-        )
-        if existing_client:
-            client_found_by = "hardware_fingerprint"
-            logger.info(f"✅ 通过硬件指纹找到现有客户端")
+            if existing_client:
+                client_found_by = field_name
+                break
 
-    # 优先级1: client_id
-    if not existing_client and client_info.client_id:
-        existing_client = (
-            db.query(models.Client)
-            .filter(models.Client.client_id == client_info.client_id)
-            .first()
-        )
-        if existing_client:
-            client_found_by = "client_id"
-
-    # 优先级2: MAC地址
-    if not existing_client and client_info.mac_address:
-        existing_client = (
-            db.query(models.Client)
-            .filter(models.Client.mac_address == client_info.mac_address)
-            .first()
-        )
-        if existing_client:
-            client_found_by = "mac_address"
-
-    # 优先级3: 硬盘序列号
-    if not existing_client and client_info.disk_serial:
-        existing_client = (
-            db.query(models.Client)
-            .filter(models.Client.disk_serial == client_info.disk_serial)
-            .first()
-        )
-        if existing_client:
-            client_found_by = "disk_serial"
-
-    # 优先级4: CPU ID + MAC组合
+    # CPU+MAC组合查找（备用）
     if not existing_client and client_info.cpu_id and client_info.mac_address:
         existing_client = (
             db.query(models.Client)
@@ -973,110 +1037,108 @@ async def register_client(
         if existing_client:
             client_found_by = "cpu_mac_combo"
 
-    # 优先级5: 计算机名+用户名（后备方案）
-    if not existing_client and client_info.computer_name and client_info.windows_user:
-        existing_client = (
-            db.query(models.Client)
-            .filter(
-                models.Client.computer_name == client_info.computer_name,
-                models.Client.windows_user == client_info.windows_user,
-            )
-            .first()
-        )
-        if existing_client:
-            client_found_by = "computer_user_combo"
-
-    # ===== 2. 处理现有客户端 =====
+    # ===== 2. 增强的防碰撞逻辑 =====
     if existing_client:
-        logger.info(f"找到现有客户端 [{client_found_by}]: {existing_client.client_id}")
+        # 核心防碰撞：硬件指纹不同则强制新建
+        hardware_conflict = (
+            existing_client.hardware_fingerprint
+            and client_info.hardware_fingerprint
+            and existing_client.hardware_fingerprint != client_info.hardware_fingerprint
+        )
 
-        # 保留原有client_id
+        if hardware_conflict:
+            logger.warning(
+                f"🚨 硬件指纹冲突！"
+                f"旧: {existing_client.hardware_fingerprint[:16]}... "
+                f"新: {client_info.hardware_fingerprint[:16]}... "
+                f"将创建新记录"
+            )
+            existing_client = None
+        else:
+            logger.info(f"✅ 客户端回连: [{client_found_by}] 匹配成功")
+
+            # 如果是通过非硬件指纹找到的，但新请求有硬件指纹，则补充
+            if (
+                client_found_by != "hardware_fingerprint"
+                and client_info.hardware_fingerprint
+            ):
+                if not existing_client.hardware_fingerprint:
+                    logger.info(f"📌 补充硬件指纹到现有客户端")
+                    existing_client.hardware_fingerprint = (
+                        client_info.hardware_fingerprint
+                    )
+                    existing_client.hardware_parts = client_info.hardware_parts
+                    existing_client.has_hardware = client_info.has_hardware
+
+    # ===== 3. 优化更新逻辑 =====
+    if existing_client:
+        # 保留原始ID
         original_client_id = existing_client.client_id
 
-        # 更新信息
-        update_data = client_info.dict(exclude_unset=True, exclude_none=True)
-        for key, value in update_data.items():
-            if (
-                value is not None
-                and hasattr(existing_client, key)
-                and key != "client_id"
-            ):
-                setattr(existing_client, key, value)
+        # 只更新必要字段
+        update_fields = [
+            "computer_name",
+            "windows_user",
+            "ip_address",
+            "os_version",
+            "client_version",
+        ]
 
-        # 恢复client_id
-        existing_client.client_id = original_client_id
+        for field in update_fields:
+            new_value = getattr(client_info, field, None)
+            if new_value is not None:
+                setattr(existing_client, field, new_value)
+
         existing_client.last_seen = beijing_now
-
-        # ===== 新增：更新硬件指纹信息 =====
-        if (
-            client_info.hardware_fingerprint
-            and not existing_client.hardware_fingerprint
-        ):
-            existing_client.hardware_fingerprint = client_info.hardware_fingerprint
-            existing_client.hardware_parts = client_info.hardware_parts
-            existing_client.has_hardware = client_info.has_hardware
-            logger.info(f"✅ 更新硬件指纹: {client_info.hardware_fingerprint[:16]}...")
-        # ================================
+        existing_client.client_id = original_client_id
 
         # 智能更新员工姓名
         if employee_name and existing_client.employee_id:
-            employee = (
+            emp = (
                 db.query(models.Employee)
                 .filter(models.Employee.employee_id == existing_client.employee_id)
                 .first()
             )
-
-            if employee and employee.name != employee_name:
-                # 只有当现有姓名是默认生成时才更新
-                if not employee.name or employee.name.startswith(
-                    employee.computer_name or ""
-                ):
-                    old_name = employee.name
-                    employee.name = employee_name
-                    logger.info(f"更新员工姓名: {old_name} -> {employee_name}")
+            if emp and (not emp.name or emp.name.startswith(emp.computer_name or "")):
+                emp.name = employee_name
+                logger.info(f"📝 更新员工姓名: {emp.name}")
 
         db.commit()
         db.refresh(existing_client)
-
         return existing_client
 
-    # ===== 3. 生成唯一员工ID =====
+    # ===== 4. 优化创建新记录 =====
     import uuid
     import hashlib
 
     # 生成唯一后缀
     if client_info.hardware_fingerprint:
-        # 使用硬件指纹的前12位作为后缀
         unique_suffix = client_info.hardware_fingerprint[:12]
-        logger.info(f"基于硬件指纹生成唯一ID: {unique_suffix}")
+        logger.info(f"🔐 基于硬件指纹生成ID: {unique_suffix}")
     else:
-        unique_suffix = str(uuid.uuid4())[:12]
-        logger.warning("无硬件信息，使用随机UUID")
+        # 无硬件指纹时，基于多信息生成
+        unique_str = f"{client_info.mac_address or ''}{client_info.computer_name or ''}{uuid.uuid4()}"
+        unique_suffix = hashlib.md5(unique_str.encode()).hexdigest()[:12]
+        logger.warning(f"⚠️ 无硬件指纹，生成临时ID: {unique_suffix}")
 
-    # 生成员工ID
-    if client_info.computer_name and client_info.windows_user:
-        base_id = f"{client_info.computer_name}\\{client_info.windows_user}"
-        employee_id = f"{base_id}_{unique_suffix}"
-    elif client_info.computer_name:
-        employee_id = f"{client_info.computer_name}_{unique_suffix}"
-    elif client_info.windows_user:
-        employee_id = f"{client_info.windows_user}_{unique_suffix}"
-    else:
-        employee_id = f"employee_{unique_suffix}"
+    # 构造员工ID
+    computer = client_info.computer_name or "PC"
+    user = client_info.windows_user or "USER"
+    employee_id = f"{computer}\\{user}_{unique_suffix}"
 
-    logger.info(f"生成员工ID: {employee_id}")
+    # 检查冲突
+    if (
+        db.query(models.Employee)
+        .filter(models.Employee.employee_id == employee_id)
+        .first()
+    ):
+        employee_id = f"{employee_id}_{uuid.uuid4().hex[:4]}"
+        logger.warning(f"⚠️ ID冲突，重新生成: {employee_id}")
 
-    # ===== 4. 创建新员工 =====
-    final_name = (
-        employee_name
-        or client_info.windows_user
-        or client_info.computer_name
-        or f"员工_{unique_suffix[:6]}"
-    )
-
+    # 创建员工
     employee = models.Employee(
         employee_id=employee_id,
-        name=final_name,
+        name=employee_name or f"员工_{unique_suffix[:6]}",
         computer_name=client_info.computer_name,
         windows_user=client_info.windows_user,
         department="自动注册",
@@ -1085,8 +1147,10 @@ async def register_client(
     )
     db.add(employee)
 
-    # ===== 5. 创建新客户端 =====
+    # 创建客户端
     client_id = client_info.client_id or f"client_{unique_suffix}"
+    if db.query(models.Client).filter(models.Client.client_id == client_id).first():
+        client_id = f"client_{unique_suffix}_{uuid.uuid4().hex[:4]}"
 
     new_client = models.Client(
         client_id=client_id,
@@ -1100,6 +1164,9 @@ async def register_client(
         disk_serial=client_info.disk_serial,
         client_version=client_info.client_version,
         last_seen=beijing_now,
+        hardware_fingerprint=client_info.hardware_fingerprint,
+        hardware_parts=client_info.hardware_parts,
+        has_hardware=client_info.has_hardware or False,
         config={
             "interval": client_info.interval or Config.SCREENSHOT_INTERVAL,
             "quality": client_info.quality or Config.SCREENSHOT_QUALITY,
@@ -1108,21 +1175,13 @@ async def register_client(
             "enable_batch_upload": True,
         },
         capabilities=client_info.capabilities or [],
-        # ===== 新增：保存硬件指纹信息 =====
-        hardware_fingerprint=client_info.hardware_fingerprint,
-        hardware_parts=client_info.hardware_parts,
-        has_hardware=client_info.has_hardware or False,
-        # ================================
     )
 
     db.add(new_client)
     db.commit()
     db.refresh(new_client)
 
-    logger.info(f"✅ 新客户端注册成功: {client_id} -> 员工: {employee_id}")
-    if new_client.hardware_fingerprint:
-        logger.info(f"  硬件指纹: {new_client.hardware_fingerprint[:16]}...")
-
+    logger.info(f"✨ 新设备注册成功: {client_id} -> {employee_id}")
     return new_client
 
 
@@ -2426,12 +2485,14 @@ def get_stats(
         # 获取员工姓名
         employee_name = a.employee_id  # 默认显示ID
         if a.employee_id:
-            employee = db.query(models.Employee).filter(
-                models.Employee.employee_id == a.employee_id
-            ).first()
+            employee = (
+                db.query(models.Employee)
+                .filter(models.Employee.employee_id == a.employee_id)
+                .first()
+            )
             if employee and employee.name:
                 employee_name = employee.name  # ✅ 使用员工姓名
-        
+
         time_str = a.created_at.strftime("%Y-%m-%d %H:%M:%S") if a.created_at else None
         formatted_activities.append(
             {
@@ -2441,7 +2502,6 @@ def get_stats(
                 "time": time_str,
             }
         )
-
 
     # ===== 15. 各员工截图统计 =====
     # 创建一个列表来存储所有有截图的员工数据
@@ -2461,22 +2521,24 @@ def get_stats(
             )
             .count()
         )
-        
+
         # 累计截图
         total_emp = (
             db.query(models.Screenshot)
             .filter(models.Screenshot.employee_id == emp.employee_id)
             .count()
         )
-        
+
         # 只添加有截图的员工（今日截图>0 或 累计截图>0）
         if today_emp > 0 or total_emp > 0:
-            all_employee_stats.append({
-                "id": emp.employee_id,
-                "name": emp.name,
-                "today": today_emp,
-                "total": total_emp,
-            })
+            all_employee_stats.append(
+                {
+                    "id": emp.employee_id,
+                    "name": emp.name,
+                    "today": today_emp,
+                    "total": total_emp,
+                }
+            )
 
     # 按今日截图数量降序排序
     all_employee_stats.sort(key=lambda x: x["today"], reverse=True)
@@ -2486,7 +2548,6 @@ def get_stats(
 
     # 如果不足5个，就返回全部
     # top_employees = all_employee_stats  # 如果想返回全部，可以用这行
-
 
     logger.info(f"统计结果:")
     logger.info(f"  今日截图: {today_count}")
@@ -2708,6 +2769,107 @@ def get_cleanup_status(
         }
 
 
+# ==================== 通知相关API ====================
+
+
+@app.get("/api/notifications", tags=["通知"])
+def get_notifications(
+    skip: int = 0,
+    limit: int = 20,
+    unread_first: bool = True,
+    type: Optional[str] = None,
+    category: Optional[str] = None,
+    include_read: bool = True,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """
+    获取当前用户的通知列表
+    """
+    result = NotificationService.get_notifications(
+        db=db,
+        user_id=current_user.id,
+        skip=skip,
+        limit=limit,
+        unread_first=unread_first,
+        type=type,
+        category=category,
+        include_read=include_read,
+    )
+
+    return result
+
+
+@app.get("/api/notifications/unread/count", tags=["通知"])
+def get_unread_count(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """
+    获取当前用户的未读通知数量
+    """
+    count = NotificationService.get_unread_count(db, current_user.id)
+    return {"count": count}
+
+
+@app.put("/api/notifications/{notification_id}/read", tags=["通知"])
+def mark_notification_read(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """
+    标记通知为已读
+    """
+    success = NotificationService.mark_as_read(db, notification_id, current_user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="通知不存在")
+
+    return {"message": "已标记为已读"}
+
+
+@app.put("/api/notifications/read-all", tags=["通知"])
+def mark_all_read(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """
+    标记所有通知为已读
+    """
+    count = NotificationService.mark_all_as_read(db, current_user.id)
+    return {"message": f"已标记 {count} 条通知为已读"}
+
+
+@app.delete("/api/notifications/{notification_id}", tags=["通知"])
+def delete_notification(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """
+    删除单条通知
+    """
+    success = NotificationService.delete_notification(
+        db, notification_id, current_user.id
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail="通知不存在")
+
+    return {"message": "通知已删除"}
+
+
+@app.delete("/api/notifications/clear-all", tags=["通知"])
+def clear_all_notifications(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """
+    清空所有通知
+    """
+    count = NotificationService.clear_all(db, current_user.id)
+    return {"message": f"已清空 {count} 条通知"}
+
+
 # ==================== 工具函数 ====================
 
 
@@ -2795,25 +2957,60 @@ def change_password(
     current_user: models.User = Depends(get_current_active_user),
 ):
     """修改当前用户密码"""
-    # 验证当前密码
+
+    # 1️⃣ 验证当前密码
     if not verify_password(password_data.current_password, current_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="当前密码错误"
         )
 
-    # 验证新密码长度
+    # 2️⃣ 验证新密码长度
     if len(password_data.new_password) < 6:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="新密码至少需要6个字符"
         )
 
-    # 更新密码
-    current_user.password_hash = get_password_hash(password_data.new_password)
-    db.commit()
+    # 3️⃣ 新密码不能与旧密码相同
+    if verify_password(password_data.new_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="新密码不能与旧密码相同"
+        )
+
+    try:
+        # 4️⃣ 更新密码
+        current_user.password_hash = get_password_hash(password_data.new_password)
+
+        # 5️⃣ 记录密码修改时间（用于 token 失效）
+        if hasattr(current_user, "password_changed_at"):
+            current_user.password_changed_at = get_utc_now()
+
+        db.commit()
+        db.refresh(current_user)
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"密码修改失败: {current_user.username}, error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="密码修改失败，请重试",
+        )
 
     logger.info(f"用户密码已修改: {current_user.username}")
 
-    return {"message": "密码修改成功"}
+    # 6️⃣ 生成新 token（保持你原有逻辑）
+    access_token_expires = timedelta(minutes=Config.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": current_user.username, "role": current_user.role},
+        expires_delta=access_token_expires,
+    )
+
+    return {
+        "message": "密码修改成功",
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": current_user.username,
+        "role": current_user.role,
+    }
 
 
 @app.post("/api/auth/regenerate-api-key", tags=["认证"])
@@ -3111,6 +3308,9 @@ def format_client_dict(client):
     )
 
 
+app.include_router(remote_screen_router)
+
+
 # ==================== 静态文件服务 ====================
 
 # 1. 截图目录处理（方案3 - StaticFiles）
@@ -3224,59 +3424,6 @@ async def serve_root():
     return {"error": "Frontend not found", "status": "index.html missing"}, 404
 
 
-@app.get("/{full_path:path}")
-async def serve_frontend(full_path: str):
-    """处理所有前端路由（SPA支持）"""
-
-    # 跳过API路径
-    if full_path.startswith("api/"):
-        return {"error": "Resource not found"}, 404
-
-    # 跳过截图路径（由 StaticFiles 处理）
-    if full_path.startswith("screenshots/"):
-        return {"error": "Resource not found"}, 404
-
-    # 跳过 assets 路径（由 StaticFiles 处理）
-    if full_path.startswith("assets/"):
-        return {"error": "Resource not found"}, 404
-
-    # 检查是否是静态文件
-    static_extensions = (
-        ".js",
-        ".css",
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".svg",
-        ".ico",
-        ".woff",
-        ".woff2",
-        ".ttf",
-        ".eot",
-        ".webp",
-    )
-
-    if any(full_path.endswith(ext) for ext in static_extensions):
-        # 先检查当前目录
-        file_path = Path.cwd() / full_path
-        if file_path.exists() and file_path.is_file():
-            return FileResponse(file_path)
-
-        # 再检查 dist 目录
-        dist_path = Path.cwd() / "dist" / full_path
-        if dist_path.exists() and dist_path.is_file():
-            return FileResponse(dist_path)
-
-        logger.debug(f"静态文件不存在: {full_path}")
-
-    # 其他所有路径返回 index.html（SPA路由）
-    if index_path.exists():
-        return FileResponse(index_path)
-
-    return {"error": "Frontend not found"}, 404
-
-
 # ==================== 可选：文件系统健康检查 ====================
 
 
@@ -3336,7 +3483,556 @@ def fix_screenshot_urls(db_session):
     return fixed_count
 
 
-# server_main.py - 在文件末尾添加
+# ==================== 浏览器历史接口 ====================
+@app.post("/api/browser/history", tags=["监控"])
+async def upload_browser_history(
+    history: List[schemas.BrowserHistoryCreate],
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    上传浏览器历史记录
+    - 客户端批量上传
+    - 自动关联员工和客户端
+    """
+    logger.info(f"📊 收到浏览器历史上传: {len(history)} 条记录")
+
+    if history:
+        logger.info(f"第一条数据: {history[0]}")
+        logger.info(f"数据类型: {type(history[0].visit_time)}")
+
+    saved_count = 0
+    for item in history:
+        try:
+            # 验证客户端是否存在
+            if item.client_id:
+                client = (
+                    db.query(models.Client)
+                    .filter(models.Client.client_id == item.client_id)
+                    .first()
+                )
+                if client:
+                    client.last_seen = get_beijing_now()
+
+            # 创建记录
+            db_history = models.BrowserHistory(**item.dict())
+            db.add(db_history)
+            saved_count += 1
+
+        except Exception as e:
+            logger.error(f"保存浏览器历史失败: {e}")
+
+    if saved_count > 0:
+        db.commit()
+        logger.info(f"✅ 已保存 {saved_count} 条浏览器历史")
+
+    return {"status": "ok", "saved": saved_count}
+
+
+# ==================== 浏览器历史接口 ====================
+
+
+@app.get("/api/browser/history", tags=["监控"])
+def get_browser_history(
+    employee_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    browser: Optional[str] = None,  # ✅ 这个参数已经存在
+    search: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """获取浏览器历史记录 - 修复浏览器筛选"""
+    from server_timezone import parse_beijing_datetime, to_utc_time, make_naive
+    from sqlalchemy import or_
+
+    query = db.query(models.BrowserHistory)
+
+    if employee_id:
+        query = query.filter(models.BrowserHistory.employee_id == employee_id)
+
+    if client_id:
+        query = query.filter(models.BrowserHistory.client_id == client_id)
+
+    # ✅ 修复：浏览器筛选逻辑
+    if browser:
+        if browser == "other":
+            # 其他浏览器：不是 chrome、edge、firefox 的
+            query = query.filter(
+                ~models.BrowserHistory.browser.in_(["chrome", "edge", "firefox"])
+            )
+        else:
+            # 精确匹配浏览器名称
+            query = query.filter(models.BrowserHistory.browser == browser)
+
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            or_(
+                models.BrowserHistory.url.ilike(search_term),
+                models.BrowserHistory.title.ilike(search_term),
+            )
+        )
+
+    if start_date:
+        beijing_start = parse_beijing_datetime(f"{start_date} 00:00:00")
+        utc_start = to_utc_time(beijing_start)
+        query = query.filter(models.BrowserHistory.visit_time >= utc_start)
+
+    if end_date:
+        beijing_end = parse_beijing_datetime(f"{end_date} 23:59:59")
+        utc_end = to_utc_time(beijing_end)
+        query = query.filter(models.BrowserHistory.visit_time <= utc_end)
+
+    total = query.count()
+    items = (
+        query.order_by(models.BrowserHistory.visit_time.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "has_more": (skip + len(items)) < total,
+    }
+
+
+# server_main.py - 修改浏览器统计接口
+
+
+@app.get("/api/browser/stats", tags=["监控"])
+def get_browser_stats(
+    employee_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    browser: Optional[str] = None,  # ✅ 添加 browser 参数
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """获取浏览器使用统计 - 修复浏览器筛选"""
+    from server_timezone import parse_beijing_datetime, to_utc_time, make_naive
+    from sqlalchemy import func
+
+    query = db.query(
+        models.BrowserHistory.browser,
+        func.count(models.BrowserHistory.id).label("visits"),
+        func.sum(models.BrowserHistory.duration).label("total_duration"),
+    )
+
+    if employee_id:
+        query = query.filter(models.BrowserHistory.employee_id == employee_id)
+
+    # ✅ 添加浏览器筛选
+    if browser:
+        if browser == "other":
+            query = query.filter(
+                ~models.BrowserHistory.browser.in_(["chrome", "edge", "firefox"])
+            )
+        else:
+            query = query.filter(models.BrowserHistory.browser == browser)
+
+    if start_date:
+        beijing_start = parse_beijing_datetime(f"{start_date} 00:00:00")
+        utc_start = to_utc_time(beijing_start)
+        query = query.filter(models.BrowserHistory.visit_time >= utc_start)
+
+    if end_date:
+        beijing_end = parse_beijing_datetime(f"{end_date} 23:59:59")
+        utc_end = to_utc_time(beijing_end)
+        query = query.filter(models.BrowserHistory.visit_time <= utc_end)
+
+    results = query.group_by(models.BrowserHistory.browser).all()
+
+    stats = []
+    for r in results:
+        stats.append(
+            {
+                "browser": r[0] or "unknown",
+                "visits": r[1],
+                "total_minutes": round((r[2] or 0) / 60, 1),
+            }
+        )
+
+    return {"items": stats, "total": len(stats)}
+
+
+# ==================== 软件使用接口 ====================
+@app.post("/api/apps/usage", tags=["监控"])
+async def upload_app_usage(
+    usage: List[schemas.AppUsageCreate],
+    db: Session = Depends(get_db),
+):
+    """上传软件使用记录"""
+    logger.info(f"📱 收到软件使用上传: {len(usage)} 条记录")
+
+    saved_count = 0
+    for item in usage:
+        try:
+            db_usage = models.AppUsage(**item.dict())
+            db.add(db_usage)
+            saved_count += 1
+        except Exception as e:
+            logger.error(f"保存软件使用失败: {e}")
+
+    if saved_count > 0:
+        db.commit()
+        logger.info(f"✅ 已保存 {saved_count} 条软件使用")
+
+    return {"status": "ok", "saved": saved_count}
+
+
+# ==================== 软件使用接口 ====================
+@app.get("/api/apps/usage", tags=["监控"])
+def get_app_usage(
+    employee_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    app_name: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    foreground_only: bool = False,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """获取软件使用记录"""
+    from server_timezone import parse_beijing_datetime, to_utc_time, make_naive
+
+    query = db.query(models.AppUsage)
+
+    if employee_id:
+        query = query.filter(models.AppUsage.employee_id == employee_id)
+
+    if client_id:
+        query = query.filter(models.AppUsage.client_id == client_id)
+
+    if app_name:
+        query = query.filter(models.AppUsage.app_name.ilike(f"%{app_name}%"))
+
+    if foreground_only:
+        query = query.filter(models.AppUsage.is_foreground == True)
+
+    if start_date:
+        beijing_start = parse_beijing_datetime(f"{start_date} 00:00:00")
+        utc_start = to_utc_time(beijing_start)
+        query = query.filter(models.AppUsage.start_time >= utc_start)
+
+    if end_date:
+        beijing_end = parse_beijing_datetime(f"{end_date} 23:59:59")
+        utc_end = to_utc_time(beijing_end)
+        query = query.filter(models.AppUsage.start_time <= utc_end)
+
+    total = query.count()
+    items = (
+        query.order_by(models.AppUsage.start_time.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "has_more": (skip + len(items)) < total,
+    }
+
+
+@app.get("/api/apps/stats", tags=["监控"])
+def get_app_stats(
+    employee_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    group_by: str = "app",
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """获取软件使用统计"""
+    from server_timezone import parse_beijing_datetime, to_utc_time, make_naive
+    from sqlalchemy import func, cast, Date
+
+    if group_by == "date":
+        query = db.query(
+            cast(models.AppUsage.start_time, Date).label("date"),
+            func.count(models.AppUsage.id).label("sessions"),
+            func.sum(models.AppUsage.duration).label("total_duration"),
+        )
+        if employee_id:
+            query = query.filter(models.AppUsage.employee_id == employee_id)
+        if start_date:
+            beijing_start = parse_beijing_datetime(f"{start_date} 00:00:00")
+            utc_start = to_utc_time(beijing_start)
+            query = query.filter(models.AppUsage.start_time >= utc_start)
+        if end_date:
+            beijing_end = parse_beijing_datetime(f"{end_date} 23:59:59")
+            utc_end = to_utc_time(beijing_end)
+            query = query.filter(models.AppUsage.start_time <= utc_end)
+        results = query.group_by(cast(models.AppUsage.start_time, Date)).all()
+
+        stats = []
+        for r in results:
+            stats.append(
+                {
+                    "date": r[0].isoformat() if r[0] else None,
+                    "sessions": r[1],
+                    "total_minutes": round((r[2] or 0) / 60, 1),
+                }
+            )
+        return {"items": stats, "total": len(stats)}
+
+    # 默认按应用分组
+    query = db.query(
+        models.AppUsage.app_name,
+        func.count(models.AppUsage.id).label("sessions"),
+        func.sum(models.AppUsage.duration).label("total_duration"),
+        func.avg(models.AppUsage.cpu_avg).label("avg_cpu"),
+        func.avg(models.AppUsage.memory_avg).label("avg_memory"),
+    )
+
+    if employee_id:
+        query = query.filter(models.AppUsage.employee_id == employee_id)
+
+    if start_date:
+        beijing_start = parse_beijing_datetime(f"{start_date} 00:00:00")
+        utc_start = to_utc_time(beijing_start)
+        query = query.filter(models.AppUsage.start_time >= utc_start)
+
+    if end_date:
+        beijing_end = parse_beijing_datetime(f"{end_date} 23:59:59")
+        utc_end = to_utc_time(beijing_end)
+        query = query.filter(models.AppUsage.start_time <= utc_end)
+
+    results = query.group_by(models.AppUsage.app_name).all()
+
+    stats = []
+    for r in results:
+        stats.append(
+            {
+                "app_name": r[0],
+                "sessions": r[1],
+                "total_minutes": round((r[2] or 0) / 60, 1),
+                "avg_cpu": round(r[3] or 0, 1),
+                "avg_memory_mb": round(r[4] or 0, 1),
+            }
+        )
+
+    return {"items": stats, "total": len(stats)}
+
+
+# ==================== 文件操作接口 ====================
+@app.post("/api/files/operations", tags=["监控"])
+async def upload_file_operations(
+    operations: List[schemas.FileOperationCreate],
+    db: Session = Depends(get_db),
+):
+    """上传文件操作记录"""
+    logger.info(f"📁 收到文件操作上传: {len(operations)} 条记录")
+
+    saved_count = 0
+    for item in operations:
+        try:
+            db_op = models.FileOperation(**item.dict())
+            db.add(db_op)
+            saved_count += 1
+        except Exception as e:
+            logger.error(f"保存文件操作失败: {e}")
+
+    if saved_count > 0:
+        db.commit()
+        logger.info(f"✅ 已保存 {saved_count} 条文件操作")
+
+    return {"status": "ok", "saved": saved_count}
+
+
+# ==================== 文件操作接口 ====================
+@app.get("/api/files/operations", tags=["监控"])
+def get_file_operations(
+    employee_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    operation: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    file_type: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """获取文件操作记录"""
+    from server_timezone import parse_beijing_datetime, to_utc_time, make_naive
+
+    query = db.query(models.FileOperation)
+
+    if employee_id:
+        query = query.filter(models.FileOperation.employee_id == employee_id)
+
+    if client_id:
+        query = query.filter(models.FileOperation.client_id == client_id)
+
+    if operation:
+        query = query.filter(models.FileOperation.operation == operation)
+
+    if file_type:
+        query = query.filter(models.FileOperation.file_type == file_type)
+
+    if start_date:
+        beijing_start = parse_beijing_datetime(f"{start_date} 00:00:00")
+        utc_start = to_utc_time(beijing_start)
+        query = query.filter(models.FileOperation.operation_time >= utc_start)
+
+    if end_date:
+        beijing_end = parse_beijing_datetime(f"{end_date} 23:59:59")
+        utc_end = to_utc_time(beijing_end)
+        query = query.filter(models.FileOperation.operation_time <= utc_end)
+
+    total = query.count()
+    items = (
+        query.order_by(models.FileOperation.operation_time.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "has_more": (skip + len(items)) < total,
+    }
+
+
+@app.get("/api/files/stats", tags=["监控"])
+def get_file_stats(
+    employee_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user),
+):
+    """获取文件操作统计"""
+    from sqlalchemy import func
+
+    # 按操作类型统计
+    stats = db.query(
+        models.FileOperation.operation,
+        func.count(models.FileOperation.id).label("count"),
+    )
+
+    if employee_id:
+        stats = stats.filter(models.FileOperation.employee_id == employee_id)
+
+    if start_date:
+        from server_timezone import parse_beijing_datetime, to_utc_time
+
+        beijing_start = parse_beijing_datetime(f"{start_date} 00:00:00")
+        utc_start = to_utc_time(beijing_start)
+        stats = stats.filter(models.FileOperation.operation_time >= utc_start)
+
+    if end_date:
+        from server_timezone import parse_beijing_datetime, to_utc_time
+
+        beijing_end = parse_beijing_datetime(f"{end_date} 23:59:59")
+        utc_end = to_utc_time(beijing_end)
+        stats = stats.filter(models.FileOperation.operation_time <= utc_end)
+
+    results = stats.group_by(models.FileOperation.operation).all()
+
+    # 按文件类型统计
+    type_stats = db.query(
+        models.FileOperation.file_type,
+        func.count(models.FileOperation.id).label("count"),
+    )
+
+    if employee_id:
+        type_stats = type_stats.filter(models.FileOperation.employee_id == employee_id)
+
+    if start_date:
+        type_stats = type_stats.filter(models.FileOperation.operation_time >= utc_start)
+
+    if end_date:
+        type_stats = type_stats.filter(models.FileOperation.operation_time <= utc_end)
+
+    type_results = (
+        type_stats.filter(models.FileOperation.file_type.isnot(None))
+        .group_by(models.FileOperation.file_type)
+        .limit(20)
+        .all()
+    )
+
+    return {
+        "by_operation": [
+            {
+                "operation": r[0],
+                "operation_cn": models.FileOperation._get_operation_cn(r[0]),
+                "count": r[1],
+            }
+            for r in results
+        ],
+        "by_file_type": [{"type": r[0] or "其他", "count": r[1]} for r in type_results],
+    }
+
+
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    """处理所有前端路由（SPA支持）"""
+
+    # 跳过API路径
+    # if full_path.startswith("api/"):
+    #     return {"error": "Resource not found"}, 404
+
+    # 跳过截图路径（由 StaticFiles 处理）
+    if full_path.startswith("screenshots/"):
+        return {"error": "Resource not found"}, 404
+
+    # 跳过 assets 路径（由 StaticFiles 处理）
+    if full_path.startswith("assets/"):
+        return {"error": "Resource not found"}, 404
+
+    # 检查是否是静态文件
+    static_extensions = (
+        ".js",
+        ".css",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".svg",
+        ".ico",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".webp",
+    )
+
+    if any(full_path.endswith(ext) for ext in static_extensions):
+        # 先检查当前目录
+        file_path = Path.cwd() / full_path
+        if file_path.exists() and file_path.is_file():
+            return FileResponse(file_path)
+
+        # 再检查 dist 目录
+        dist_path = Path.cwd() / "dist" / full_path
+        if dist_path.exists() and dist_path.is_file():
+            return FileResponse(dist_path)
+
+        logger.debug(f"静态文件不存在: {full_path}")
+
+    # 其他所有路径返回 index.html（SPA路由）
+    if index_path.exists():
+        return FileResponse(index_path)
+
+    return {"error": "Frontend not found"}, 404
+
 
 from fastapi import Depends
 

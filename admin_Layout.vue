@@ -35,9 +35,25 @@
           <el-icon><Monitor /></el-icon>
           <span>客户端管理</span>
         </el-menu-item>
+        <el-menu-item index="/browser">
+          <el-icon><ChromeFilled /></el-icon>
+          <span>浏览历史</span>
+        </el-menu-item>
+        <el-menu-item index="/apps">
+          <el-icon><Grid /></el-icon>
+          <span>软件统计</span>
+        </el-menu-item>
+        <el-menu-item index="/files">
+          <el-icon><Folder /></el-icon>
+          <span>文件监控</span>
+        </el-menu-item>
         <el-menu-item index="/stats">
           <el-icon><DataLine /></el-icon>
           <span>数据分析</span>
+        </el-menu-item>
+        <el-menu-item index="/remote">
+          <el-icon><VideoCamera /></el-icon>
+          <span>远程屏幕</span>
         </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Setting /></el-icon>
@@ -50,6 +66,7 @@
       <!-- 头部 -->
       <el-header class="header">
         <div class="header-left">
+          <!-- 折叠/展开侧边栏按钮 -->
           <el-button
             class="toggle-btn"
             :icon="appStore.sidebarCollapsed ? Expand : Fold"
@@ -65,6 +82,7 @@
         </div>
 
         <div class="header-right">
+          <!-- 全屏按钮 -->
           <el-tooltip content="全屏" placement="bottom">
             <el-button
               class="header-btn"
@@ -74,35 +92,120 @@
             />
           </el-tooltip>
 
+          <!-- 通知中心 -->
           <el-badge
-            :value="notificationCount"
-            :hidden="notificationCount === 0"
+            :value="unreadCount"
+            :hidden="unreadCount === 0"
             class="notification-badge"
           >
-            <el-dropdown trigger="click">
+            <el-dropdown
+              trigger="click"
+              @visible-change="handleDropdownVisible"
+            >
               <el-button class="header-btn" :icon="Bell" text />
               <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item
-                    v-for="notif in notifications"
-                    :key="notif.id"
-                  >
-                    <div class="notification-item">
-                      <div class="notification-title">{{ notif.title }}</div>
-                      <div class="notification-time">{{ notif.time }}</div>
+                <el-dropdown-menu class="notification-dropdown">
+                  <div class="notification-header">
+                    <span class="notification-title">通知中心</span>
+                    <div class="notification-actions">
+                      <el-button
+                        v-if="notifications.length > 0"
+                        link
+                        type="primary"
+                        size="small"
+                        @click="markAllAsRead"
+                      >
+                        全部已读
+                      </el-button>
+                      <el-button
+                        v-if="notifications.length > 0"
+                        link
+                        type="danger"
+                        size="small"
+                        @click="clearAllNotifications"
+                      >
+                        清空
+                      </el-button>
                     </div>
-                  </el-dropdown-item>
-                  <el-dropdown-item divided>
-                    <el-button link type="primary" @click="viewAllNotifications"
-                      >查看全部</el-button
+                  </div>
+
+                  <el-divider style="margin: 8px 0" />
+
+                  <div
+                    class="notification-list"
+                    v-loading="notificationLoading"
+                  >
+                    <template v-if="notifications.length > 0">
+                      <el-dropdown-item
+                        v-for="notif in notifications"
+                        :key="notif.id"
+                        :class="[
+                          'notification-item',
+                          { 'is-unread': !notif.read },
+                        ]"
+                        @click="handleNotificationClick(notif)"
+                      >
+                        <div class="notification-content">
+                          <div class="notification-title-row">
+                            <span class="notification-item-title">{{
+                              notif.title
+                            }}</span>
+                            <el-tag
+                              v-if="notif.type"
+                              :type="getNotificationType(notif.type)"
+                              size="small"
+                              effect="plain"
+                            >
+                              {{ notif.type }}
+                            </el-tag>
+                          </div>
+                          <div
+                            class="notification-desc"
+                            v-if="notif.description"
+                          >
+                            {{ notif.description }}
+                          </div>
+                          <div class="notification-time">
+                            {{ formatRelativeTime(notif.created_at) }}
+                          </div>
+                        </div>
+                        <div class="notification-actions">
+                          <el-button
+                            link
+                            type="danger"
+                            size="small"
+                            @click.stop="deleteNotification(notif.id)"
+                          >
+                            删除
+                          </el-button>
+                        </div>
+                      </el-dropdown-item>
+                    </template>
+
+                    <el-empty v-else description="暂无通知" :image-size="80" />
+                  </div>
+
+                  <el-divider style="margin: 8px 0" />
+
+                  <div class="notification-footer">
+                    <el-button
+                      link
+                      type="primary"
+                      @click="viewAllNotifications"
                     >
-                  </el-dropdown-item>
+                      查看全部
+                    </el-button>
+                  </div>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
           </el-badge>
 
-          <el-dropdown @command="handleCommand">
+          <!-- 用户下拉菜单 - 添加 popper-class -->
+          <el-dropdown
+            @command="handleCommand"
+            popper-class="user-dropdown-menu"
+          >
             <div class="user-info">
               <el-avatar :size="36" :icon="User" />
               <span class="username">{{
@@ -157,7 +260,7 @@
       <el-footer class="footer">
         <div class="footer-content">
           <span>© DHPG监控系统</span>
-          <span class="version">版本 1.0.0</span>
+          <span class="version">版本 4.0.1</span>
         </div>
       </el-footer>
     </el-container>
@@ -206,7 +309,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
@@ -224,8 +327,16 @@ import {
   ArrowDown,
   Lock,
   SwitchButton,
+  ChromeFilled,
+  Grid,
+  Folder,
+  VideoCamera,
+  VideoPause,
 } from "@element-plus/icons-vue";
 import { useUserStore, useAppStore } from "./admin_stores";
+import api from "./admin_api";
+import { notificationApi } from "./admin_notification";
+import { formatRelativeTime } from "./admin_timezone";
 
 const route = useRoute();
 const router = useRouter();
@@ -242,11 +353,6 @@ const visitedViews = ref([]);
 const cachedViews = ref([]);
 const isFullscreen = ref(false);
 const notificationCount = ref(3);
-const notifications = ref([
-  { id: 1, title: "新客户端注册", time: "5分钟前" },
-  { id: 2, title: "存储空间不足", time: "10分钟前" },
-  { id: 3, title: "备份完成", time: "1小时前" },
-]);
 
 const passwordDialogVisible = ref(false);
 const passwordLoading = ref(false);
@@ -317,8 +423,6 @@ const toggleFullscreen = () => {
   }
 };
 
-const viewAllNotifications = () => ElMessage.info("功能开发中...");
-
 const handleCommand = (command) => {
   switch (command) {
     case "profile":
@@ -344,23 +448,63 @@ const handleLogout = () => {
   });
 };
 
+// 提交修改密码 - 真实API调用
 const submitPassword = async () => {
   if (!passwordFormRef.value) return;
-  await passwordFormRef.value.validate((valid) => {
-    if (valid) {
-      passwordLoading.value = true;
-      setTimeout(() => {
-        ElMessage.success("密码修改成功");
-        passwordDialogVisible.value = false;
-        passwordForm.value = {
-          oldPassword: "",
-          newPassword: "",
-          confirmPassword: "",
-        };
-        passwordLoading.value = false;
-      }, 1000);
+
+  // 表单验证
+  const valid = await passwordFormRef.value.validate().catch(() => false);
+  if (!valid) return;
+
+  passwordLoading.value = true;
+
+  try {
+    // 调用后端API
+    const response = await api.post("/auth/change-password", {
+      current_password: passwordForm.value.oldPassword,
+      new_password: passwordForm.value.newPassword,
+    });
+
+    // 如果返回了新token，更新本地存储
+    if (response.access_token) {
+      // 更新store
+      userStore.token = response.access_token;
+      userStore.userInfo = {
+        username: response.username,
+        role: response.role,
+      };
+
+      // 更新localStorage
+      localStorage.setItem("token", response.access_token);
+      localStorage.setItem("user", JSON.stringify(userStore.userInfo));
+
+      // 更新axios默认头
+      api.defaults.headers.common["Authorization"] =
+        `Bearer ${response.access_token}`;
+
+      ElMessage.success("密码修改成功，已自动更新登录状态");
+    } else {
+      ElMessage.success("密码修改成功");
     }
-  });
+
+    // 关闭对话框
+    passwordDialogVisible.value = false;
+
+    // 清空表单
+    passwordForm.value = {
+      oldPassword: "",
+      newPassword: "",
+      confirmPassword: "",
+    };
+  } catch (error) {
+    console.error("修改密码失败:", error);
+
+    // 显示具体错误信息
+    const errorMsg = error.response?.data?.detail || "修改密码失败，请重试";
+    ElMessage.error(errorMsg);
+  } finally {
+    passwordLoading.value = false;
+  }
 };
 
 watch(
@@ -371,6 +515,162 @@ watch(
   },
   { immediate: true },
 );
+
+// ==================== 通知功能 ====================
+const notifications = ref([]);
+const unreadCount = ref(0);
+const notificationLoading = ref(false);
+let pollTimer = null;
+
+// 加载通知列表
+const loadNotifications = async () => {
+  notificationLoading.value = true;
+  try {
+    const response = await notificationApi.getNotifications({
+      limit: 10,
+      unread_first: true,
+    });
+    notifications.value = response.items || [];
+    console.log("通知加载成功:", notifications.value);
+  } catch (error) {
+    console.error("加载通知失败:", error);
+  } finally {
+    notificationLoading.value = false;
+  }
+};
+
+// 加载未读数量
+const loadUnreadCount = async () => {
+  try {
+    const response = await notificationApi.getUnreadCount();
+    unreadCount.value = response.count || 0;
+  } catch (error) {
+    console.error("加载未读数量失败:", error);
+  }
+};
+
+// 标记为已读
+const markAsRead = async (id) => {
+  try {
+    await notificationApi.markAsRead(id);
+    await loadUnreadCount();
+    await loadNotifications(); // 刷新列表
+  } catch (error) {
+    console.error("标记已读失败:", error);
+  }
+};
+
+// 全部标记为已读
+const markAllAsRead = async () => {
+  try {
+    await notificationApi.markAllAsRead();
+    await loadUnreadCount();
+    await loadNotifications();
+    ElMessage.success("已全部标记为已读");
+  } catch (error) {
+    console.error("全部标记已读失败:", error);
+  }
+};
+
+// 删除单条通知
+const deleteNotification = async (id) => {
+  try {
+    await notificationApi.deleteNotification(id);
+    await loadUnreadCount();
+    await loadNotifications();
+    ElMessage.success("通知已删除");
+  } catch (error) {
+    console.error("删除通知失败:", error);
+  }
+};
+
+// 清空所有通知
+const clearAllNotifications = () => {
+  ElMessageBox.confirm("确定要清空所有通知吗？", "提示", {
+    confirmButtonText: "确定",
+    cancelButtonText: "取消",
+    type: "warning",
+  }).then(async () => {
+    try {
+      await notificationApi.clearAll();
+      notifications.value = [];
+      unreadCount.value = 0;
+      ElMessage.success("通知已清空");
+    } catch (error) {
+      console.error("清空通知失败:", error);
+    }
+  });
+};
+
+// 点击通知
+const handleNotificationClick = (notif) => {
+  // 如果未读，标记为已读
+  if (!notif.read) {
+    markAsRead(notif.id);
+  }
+
+  // 根据通知类型跳转
+  if (notif.action && notif.action.url) {
+    router.push(notif.action.url);
+  }
+};
+
+// 下拉菜单显示状态变化
+const handleDropdownVisible = (visible) => {
+  if (visible) {
+    // 每次打开下拉菜单时刷新数据
+    loadNotifications();
+  }
+};
+
+// 获取通知类型对应的标签类型
+const getNotificationType = (type) => {
+  const typeMap = {
+    info: "info",
+    success: "success",
+    warning: "warning",
+    error: "danger",
+    新客户端注册: "success",
+    存储空间不足: "danger",
+    备份完成: "info",
+    清理完成: "success",
+    系统更新: "warning",
+  };
+  return typeMap[type] || "info";
+};
+
+// 查看全部
+const viewAllNotifications = () => {
+  router.push("/notifications");
+};
+
+// 启动轮询
+const startPolling = () => {
+  // 每60秒检查一次新通知
+  pollTimer = setInterval(() => {
+    loadUnreadCount();
+  }, 60000);
+};
+
+// 停止轮询
+const stopPolling = () => {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+};
+
+// 在组件挂载时加载数据并启动轮询
+onMounted(() => {
+  loadUnreadCount();
+  loadNotifications();
+  startPolling();
+});
+
+// 组件卸载时停止轮询
+onUnmounted(() => {
+  stopPolling();
+});
 </script>
 
 <style scoped>
@@ -490,5 +790,353 @@ watch(
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+</style>
+
+<!-- 全局样式 - 作用于整个页面，用于渲染在 body 下的下拉菜单 -->
+<style>
+/* ===== 1. 基础容器样式 ===== */
+.el-popper {
+  --el-popover-padding: 0;
+  padding: 0 !important;
+  border: none !important;
+  margin-top: 8px !important;
+}
+
+/* 所有下拉菜单的基础样式 */
+.el-dropdown-menu {
+  padding: 0 !important;
+  border: none !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+  min-width: 120px !important;
+}
+
+.el-dropdown-menu__item {
+  padding: 10px 16px !important;
+  height: auto !important;
+  line-height: normal !important;
+  font-size: 14px !important;
+  color: #333 !important;
+  border-bottom: 1px solid #f0f2f5 !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  transition: all 0.3s ease !important;
+  white-space: nowrap !important;
+}
+
+.el-dropdown-menu__item:last-child {
+  border-bottom: none !important;
+}
+
+.el-dropdown-menu__item:hover {
+  background-color: #f5f7fa !important;
+  color: #409eff !important;
+}
+
+.el-dropdown-menu__item .el-icon {
+  font-size: 16px !important;
+  color: #909399 !important;
+}
+
+.el-dropdown-menu__item:hover .el-icon {
+  color: #409eff !important;
+}
+
+/* 退出登录项特殊样式 */
+.el-dropdown-menu__item:last-child:hover {
+  background-color: #fef0f0 !important;
+  color: #f56c6c !important;
+}
+
+.el-dropdown-menu__item:last-child:hover .el-icon {
+  color: #f56c6c !important;
+}
+
+/* 分割线样式 */
+.el-dropdown-menu__item.is-divided {
+  margin-top: 4px !important;
+  border-top: 1px solid #ebeef5 !important;
+}
+
+/* ===== 2. 用户下拉菜单专用样式（新增）===== */
+.user-dropdown-menu {
+  min-width: 160px !important;
+}
+
+/* 用户菜单项左对齐（覆盖通知菜单的居中样式） */
+.user-dropdown-menu .el-dropdown-menu__item {
+  justify-content: flex-start !important;
+}
+
+/* ===== 3. 通知铃铛图标样式 ===== */
+.notification-badge .header-btn {
+  position: relative;
+}
+
+.notification-badge .header-btn .el-icon {
+  font-size: 20px;
+}
+
+/* ===== 4. 分割线样式优化 ===== */
+.notification-dropdown .el-divider--horizontal {
+  margin: 0;
+  border-top-color: #ebeef5;
+}
+
+/* ===== 5. 通知下拉菜单容器 ===== */
+.notification-dropdown {
+  width: 360px;
+  max-width: 90vw;
+  padding: 0 !important;
+  margin-top: 8px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+  border: 1px solid #e4e7ed;
+  z-index: 9999 !important;
+}
+
+/* 通知菜单头部 */
+.notification-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid #ebeef5;
+  background-color: #f8f9fa;
+}
+
+.notification-title {
+  font-weight: 600;
+  color: #303133;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.notification-title::before {
+  content: "🔔";
+  font-size: 14px;
+}
+
+.notification-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.notification-actions .el-button {
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+/* 通知列表 */
+.notification-list {
+  max-height: 400px;
+  overflow-y: auto;
+  background-color: #fff;
+}
+
+/* 通知项 - 覆盖默认的下拉菜单项样式 */
+.notification-dropdown .el-dropdown-menu__item {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: flex-start !important;
+  padding: 14px 16px !important;
+  height: auto !important;
+  line-height: 1.5 !important;
+  white-space: normal !important;
+  border-bottom: 1px solid #f0f2f5 !important;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  background-color: transparent !important;
+}
+
+.notification-dropdown .el-dropdown-menu__item:last-child {
+  border-bottom: none !important;
+}
+
+.notification-dropdown .el-dropdown-menu__item:hover {
+  background-color: #f5f7fa !important;
+  transform: translateX(2px);
+}
+
+.notification-dropdown .el-dropdown-menu__item.is-unread {
+  background-color: #f0f9ff !important;
+  position: relative;
+}
+
+.notification-dropdown .el-dropdown-menu__item.is-unread::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background-color: #409eff;
+}
+
+.notification-dropdown .el-dropdown-menu__item.is-unread:hover {
+  background-color: #e6f7ff !important;
+}
+
+/* 通知内容 */
+.notification-content {
+  flex: 1;
+  min-width: 0;
+  margin-right: 12px;
+}
+
+.notification-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.notification-item-title {
+  font-weight: 500;
+  color: #303133;
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.notification-title-row .el-tag {
+  margin-left: 2px;
+  padding: 0 6px;
+  height: 18px;
+  line-height: 16px;
+  font-size: 10px;
+  border-radius: 4px;
+  border: none;
+}
+
+.notification-desc {
+  font-size: 12px;
+  color: #606266;
+  margin-bottom: 6px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.notification-time {
+  font-size: 11px;
+  color: #909399;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.notification-time::before {
+  content: "⏱️";
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* 通知项的删除按钮 */
+.notification-dropdown .el-dropdown-menu__item .el-button {
+  opacity: 0.3;
+  transition: all 0.3s ease;
+  padding: 4px 6px;
+  min-height: auto;
+  margin: -4px 0;
+  border-radius: 4px;
+}
+
+.notification-dropdown .el-dropdown-menu__item .el-button:hover {
+  opacity: 1;
+  background-color: #fef0f0 !important;
+  color: #f56c6c !important;
+}
+
+.notification-dropdown .el-dropdown-menu__item:hover .el-button {
+  opacity: 0.8;
+}
+
+/* 通知底部 */
+.notification-footer {
+  text-align: center;
+  padding: 10px 16px;
+  border-top: 1px solid #ebeef5;
+  background-color: #f8f9fa;
+}
+
+.notification-footer .el-button {
+  width: 100%;
+  color: #409eff;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 0;
+  height: auto;
+  transition: all 0.3s;
+}
+
+.notification-footer .el-button:hover {
+  background-color: #ecf5ff !important;
+  transform: translateY(-1px);
+}
+
+/* ===== 6. 空状态样式 ===== */
+.notification-list .el-empty {
+  padding: 40px 0;
+  background-color: #fff;
+}
+
+.notification-list .el-empty__image {
+  width: 80px;
+}
+
+.notification-list .el-empty__image svg {
+  color: #dcdfe6;
+  width: 60px;
+  height: 60px;
+}
+
+.notification-list .el-empty__description p {
+  color: #909399;
+  font-size: 13px;
+}
+
+/* ===== 7. 自定义滚动条样式 ===== */
+.notification-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.notification-list::-webkit-scrollbar-track {
+  background: #f5f7fa;
+  border-radius: 4px;
+}
+
+.notification-list::-webkit-scrollbar-thumb {
+  background: #dcdfe6;
+  border-radius: 4px;
+  transition: background 0.3s;
+}
+
+.notification-list::-webkit-scrollbar-thumb:hover {
+  background: #c0c4cc;
+}
+
+/* ===== 8. 响应式调整 ===== */
+@media screen and (max-width: 768px) {
+  .notification-dropdown {
+    width: 300px;
+  }
+
+  .notification-dropdown .el-dropdown-menu__item {
+    padding: 10px 12px !important;
+  }
+
+  .notification-title-row {
+    gap: 4px;
+  }
+
+  .notification-item-title {
+    font-size: 13px;
+  }
 }
 </style>

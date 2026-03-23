@@ -2,7 +2,7 @@
 认证授权模块 - 使用 werkzeug 替代 passlib
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status
@@ -24,7 +24,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def get_password_hash(password: str) -> str:
     """获取密码哈希 - 使用 werkzeug"""
-    return generate_password_hash(password)
+    return generate_password_hash(password, method="pbkdf2:sha256")
 
 
 def authenticate_user(db: Session, username: str, password: str):
@@ -36,33 +36,37 @@ def authenticate_user(db: Session, username: str, password: str):
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-
     to_encode = data.copy()
 
-    # 🚀 使用 get_utc_now() 获取当前UTC时间（aware）
+    # 使用 get_utc_now() 获取当前UTC时间（aware）
     from server_timezone import get_utc_now
 
+    now = get_utc_now()
+
     if expires_delta:
-        # expires_delta 是 timedelta 对象
-        expire = get_utc_now() + expires_delta
+        expire = now + expires_delta
     else:
-        expire = get_utc_now() + timedelta(minutes=Config.ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = now + timedelta(minutes=Config.ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    # 🚀 JWT的exp字段需要Unix时间戳（秒数，int类型）
-    # 将datetime对象转换为Unix时间戳
-    expire_timestamp = int(expire.timestamp())
-
-    to_encode.update({"exp": expire_timestamp})
+    # 添加签发时间（iat）到token
+    to_encode.update(
+        {
+            "exp": int(expire.timestamp()),
+            "iat": int(now.timestamp()),  # token签发时间
+        }
+    )
 
     encoded_jwt = jwt.encode(to_encode, Config.SECRET_KEY, algorithm=Config.ALGORITHM)
-
     return encoded_jwt
+
+
+# server_auth.py - 增强的token验证
 
 
 async def get_current_user(
     token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
 ):
-    """获取当前用户"""
+    """获取当前用户 - 增强版，检查密码修改时间"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="无效的认证凭证",
@@ -72,6 +76,8 @@ async def get_current_user(
     try:
         payload = jwt.decode(token, Config.SECRET_KEY, algorithms=[Config.ALGORITHM])
         username: str = payload.get("sub")
+        token_iat = payload.get("iat")  # token签发时间
+
         if username is None:
             raise credentials_exception
     except JWTError:
@@ -80,6 +86,22 @@ async def get_current_user(
     user = db.query(models.User).filter(models.User.username == username).first()
     if user is None:
         raise credentials_exception
+
+    # 检查密码是否在token签发后被修改过
+    if user.password_changed_at and token_iat:
+        # 将token签发时间（Unix时间戳）转换为datetime
+        from datetime import timezone
+
+        token_iat_dt = datetime.fromtimestamp(token_iat, tz=timezone.utc)
+
+        # 如果密码修改时间晚于token签发时间，说明这个token是旧密码时期的
+        if user.password_changed_at > token_iat_dt:
+            logger.warning(f"用户 {username} 使用旧密码的token尝试访问")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="密码已修改，请重新登录",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
     return user
 

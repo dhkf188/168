@@ -104,6 +104,10 @@ class ClientBase(BaseModel):
     cpu_id: Optional[str] = None
     disk_serial: Optional[str] = None
     client_version: Optional[str] = None
+    first_seen: Optional[datetime] = None
+    fingerprint_history: Optional[List[dict]] = []
+    ip_history: Optional[List[dict]] = []
+    review_flags: Optional[List[dict]] = []
 
 
 class ClientCreate(ClientBase):
@@ -125,9 +129,13 @@ class Client(ClientBase):
     config: Optional[Dict[str, Any]] = None
     capabilities: List[str] = []
     created_at: Optional[datetime] = None
+    client_metadata: Optional[Dict[str, Any]] = None
+    first_seen: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+        arbitrary_types_allowed = True
+        extra = "ignore"
 
 
 # ========== 🚀 修复：增强 Heartbeat 模型，不使用 dateutil ==========
@@ -263,3 +271,125 @@ class CleanupStatus(BaseModel):
     pending_cleanup: int
     pending_size_mb: float
     last_cleanup: Optional[str] = None
+
+
+# ==================== 通知相关 ====================
+
+
+class NotificationBase(BaseModel):
+    title: str
+    content: Optional[str] = None
+    type: str = "info"
+    category: str = "system"
+    related_id: Optional[str] = None
+    related_type: Optional[str] = None
+    action_url: Optional[str] = None
+    action_text: Optional[str] = None
+    expires_at: Optional[datetime] = None
+
+
+class NotificationCreate(NotificationBase):
+    user_id: int
+
+
+class NotificationUpdate(BaseModel):
+    is_read: Optional[bool] = None
+    read_at: Optional[datetime] = None
+
+
+class Notification(NotificationBase):
+    id: int
+    user_id: int
+    is_read: bool
+    created_at: datetime
+    read_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class NotificationListResponse(BaseModel):
+    items: List[Notification]
+    total: int
+    skip: int = 0
+    limit: int = 20
+    has_more: bool = False
+
+
+class UnreadCountResponse(BaseModel):
+    count: int
+
+
+# ==================== 浏览器历史 ====================
+class BrowserHistoryBase(BaseModel):
+    employee_id: str
+    client_id: Optional[str] = None
+    url: str
+    title: Optional[str] = None
+    browser: Optional[str] = None
+    duration: int = 0
+    visit_time: datetime
+
+
+class BrowserHistoryCreate(BrowserHistoryBase):
+    pass
+
+
+class BrowserHistory(BrowserHistoryBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ==================== 软件使用 ====================
+class AppUsageBase(BaseModel):
+    employee_id: str
+    client_id: Optional[str] = None
+    app_name: str
+    app_path: Optional[str] = None
+    window_title: Optional[str] = None
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    duration: int = 0
+    is_foreground: bool = False
+    cpu_avg: int = 0
+    memory_avg: int = 0
+
+
+class AppUsageCreate(AppUsageBase):
+    pass
+
+
+class AppUsage(AppUsageBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ==================== 文件操作 ====================
+class FileOperationBase(BaseModel):
+    employee_id: str
+    client_id: Optional[str] = None
+    operation: str
+    file_path: str
+    file_name: Optional[str] = None
+    file_size: int = 0
+    file_type: Optional[str] = None
+    is_directory: bool = False
+    operation_time: datetime
+
+
+class FileOperationCreate(FileOperationBase):
+    pass
+
+
+class FileOperation(FileOperationBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

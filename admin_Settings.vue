@@ -1038,45 +1038,70 @@ const deleteBackup = (row) => {
 };
 
 // ==================== 密码相关功能 ====================
-
-// 修改密码
 const changePassword = async () => {
   if (!passwordFormRef.value) return;
 
-  await passwordFormRef.value.validate(async (valid) => {
-    if (valid) {
-      changingPassword.value = true;
-      try {
-        // 调用后端修改密码API
-        await api.post("/auth/change-password", {
-          current_password: passwordForm.value.currentPassword,
-          new_password: passwordForm.value.newPassword,
-        });
+  const valid = await passwordFormRef.value.validate().catch(() => false);
+  if (!valid) return;
 
-        ElMessage.success("密码修改成功，请使用新密码重新登录");
+  // ✅ 前端确认密码校验
+  if (passwordForm.value.newPassword !== passwordForm.value.confirmPassword) {
+    ElMessage.error("两次输入的密码不一致");
+    return;
+  }
 
-        // 清空表单
-        passwordForm.value = {
-          currentPassword: "",
-          newPassword: "",
-          confirmPassword: "",
-        };
+  changingPassword.value = true;
 
-        // 3秒后退出登录，让用户重新登录
-        setTimeout(() => {
-          userStore.logout();
-          router.push("/login");
-        }, 3000);
-      } catch (error) {
-        console.error("修改密码失败:", error);
-        ElMessage.error(
-          error.response?.data?.detail || "密码修改失败，请检查当前密码",
-        );
-      } finally {
-        changingPassword.value = false;
-      }
+  try {
+    const response = await api.post("/auth/change-password", {
+      current_password: passwordForm.value.currentPassword,
+      new_password: passwordForm.value.newPassword,
+    });
+
+    const res = response.data || response;
+
+    if (res.access_token) {
+      // ✅ 更新 store
+      userStore.token = res.access_token;
+      userStore.userInfo = {
+        username: res.username,
+        role: res.role,
+      };
+
+      // ✅ 更新本地缓存
+      localStorage.setItem("token", res.access_token);
+      localStorage.setItem("user", JSON.stringify(userStore.userInfo));
+
+      ElMessage.success("密码修改成功，已自动重新登录");
+
+      // 清空表单
+      passwordForm.value = {
+        currentPassword: "",
+        newPassword: "",
+        confirmPassword: "",
+      };
+
+      passwordDialogVisible.value = false;
+
+    } else {
+      ElMessage.success("密码修改成功，请重新登录");
+
+      setTimeout(() => {
+        userStore.logout();
+        router.push("/login");
+      }, 1500);
     }
-  });
+
+  } catch (error) {
+    console.error("修改密码失败:", error);
+
+    ElMessage.error(
+      error.response?.data?.detail || "密码修改失败，请重试"
+    );
+
+  } finally {
+    changingPassword.value = false;
+  }
 };
 
 // 复制API密钥

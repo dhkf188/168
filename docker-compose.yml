@@ -1,3 +1,4 @@
+# docker-compose.yml - 完整修复版
 version: "3.8"
 
 services:
@@ -63,10 +64,12 @@ services:
   server:
     build:
       context: .
-      dockerfile: Dockerfile.server
+      dockerfile: Dockerfile
     container_name: employee-monitor-server
     environment:
+      # ✅ 修复：使用 postgresql:// 格式
       - DATABASE_URL=postgresql://admin:${DB_PASSWORD:-Admin@123456}@postgres:5432/employeemonitor
+      # ✅ 备用数据库配置
       - BACKUP_DATABASE_URL=postgresql://backup_user:${BACKUP_DB_PASSWORD:-Backup@123456}@postgres_backup:5432/employeemonitor_backup
       - USE_BACKUP_DB=false
       - REDIS_URL=redis://redis:6379/0
@@ -80,6 +83,8 @@ services:
       - CLEANUP_INTERVAL=21600
       - SCREENSHOT_RETENTION_HOURS=4
       - DEBUG=false
+      # ✅ 新增：CA 证书路径（Aiven 需要）
+      - CA_CERT_PATH=/etc/ssl/certs/ca-certificates.crt
     volumes:
       - screenshots_data:/data/screenshots
       - logs_data:/data/logs
@@ -90,26 +95,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # 备用数据库可选，不强制依赖
     restart: unless-stopped
+    # ✅ 修复：使用 wget 代替 curl
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8000/health",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
-    networks:
-      - monitor-network
-
-  # 后台管理（Vue）
-  admin:
-    build:
-      context: .
-      dockerfile: Dockerfile.admin
-    container_name: employee-monitor-admin
-    ports:
-      - "80:80"
-    depends_on:
-      - server
-    restart: unless-stopped
     networks:
       - monitor-network
 
@@ -120,16 +121,18 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - screenshots_data:/data/screenshots:ro
+      - ./dist:/usr/share/nginx/html:ro
     ports:
-      - "443:443"
+      - "80:80" # HTTP
+      - "443:443" # HTTPS（如果有证书）
     depends_on:
       - server
-      - admin
     restart: unless-stopped
     networks:
       - monitor-network
+    # ✅ 添加 profiles，默认不启动（可选）
     profiles:
-      - production
+      - nginx
 
   # 定时备份任务
   backup:

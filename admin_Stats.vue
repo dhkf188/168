@@ -373,9 +373,14 @@ const loadEmployeeRank = async () => {
 };
 
 // 加载员工统计
+// 加载员工统计
 const loadEmployeeStats = async () => {
   try {
-    const employees = await employeeApi.getEmployees();
+    const response = await employeeApi.getEmployees({ limit: 1000 });
+
+    // ✅ 修复：正确处理标准化响应
+    const employees = response.items || [];
+
     employeeStats.value = employees.map((emp) => ({
       name: emp.name,
       today: emp.today_screenshots || 0,
@@ -385,13 +390,18 @@ const loadEmployeeStats = async () => {
     }));
   } catch (error) {
     console.error("加载员工统计失败:", error);
+    employeeStats.value = []; // 设置为空数组避免错误
   }
 };
 
 // 加载客户端统计
+// 加载客户端统计
 const loadClientStats = async () => {
   try {
-    const clients = await clientApi.getClients();
+    const response = await clientApi.getClients({ limit: 1000 });
+
+    // ✅ 修复：正确处理标准化响应
+    const clients = response.items || [];
 
     // 按版本分组
     const versionMap = new Map();
@@ -421,6 +431,7 @@ const loadClientStats = async () => {
     clientStats.value = Array.from(versionMap.values());
   } catch (error) {
     console.error("加载客户端统计失败:", error);
+    clientStats.value = []; // 设置为空数组避免错误
   }
 };
 

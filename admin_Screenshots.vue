@@ -1,16 +1,5 @@
 <template>
   <div class="screenshots">
-    <!-- ===== 新增：时区提示 ===== -->
-    <el-alert
-      v-if="showTimezoneHint"
-      title="所有时间均为北京时间 (UTC+8)"
-      type="info"
-      :closable="true"
-      show-icon
-      class="timezone-hint"
-      @close="showTimezoneHint = false"
-    />
-
     <!-- 筛选栏 -->
     <el-card class="filter-bar" shadow="hover">
       <el-row :gutter="20" align="middle">
@@ -342,7 +331,11 @@ const paginatedScreenshots = computed(() => screenshots.value);
 const previewTitle = computed(() => {
   if (!currentPreview.value) return "";
   const employeeName = getEmployeeName(currentPreview.value);
-  return `截图预览 - ${employeeName} - ${currentPreview.value.datetime} (北京时间)`;
+  const formattedTime = formatFullDateTime(
+    currentPreview.value.screenshot_time,
+  );
+  // formatFullDateTime 已经返回 "YYYY-MM-DD HH:mm:ss (北京时间)" 格式
+  return `截图预览 - ${employeeName} - ${formattedTime}`;
 });
 
 // ===== 格式化小时显示 =====
