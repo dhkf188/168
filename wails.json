@@ -1,0 +1,12 @@
+{
+  "name": "EmployeeMonitor",
+  "outputfilename": "employee_monitor",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "Employee Monitor",
+    "email": ""
+  }
+}

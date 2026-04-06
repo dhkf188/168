@@ -332,16 +332,6 @@ const loadEmployeeRank = async () => {
     // ✅ 调用修改后的API，返回统一格式
     const response = await employeeApi.getEmployees({ limit: 100 });
 
-    console.log("员工排行响应:", {
-      总数: response.total,
-      返回数: response.items?.length,
-      格式: response.items
-        ? "标准化格式"
-        : Array.isArray(response)
-          ? "数组格式"
-          : "未知",
-    });
-
     // ✅ 直接使用标准化的 items
     const employees = response.items || [];
 
@@ -356,11 +346,6 @@ const loadEmployeeRank = async () => {
       }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 10);
-
-    console.log("员工排行计算完成:", {
-      员工总数: employees.length,
-      排行前3: employeeRank.value.slice(0, 3),
-    });
   } catch (error) {
     console.error("加载员工排行失败:", error);
     ElMessage.error(

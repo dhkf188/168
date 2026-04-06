@@ -365,9 +365,45 @@ const loadStats = async () => {
       params.start_date = filters.value.dateRange[0];
       params.end_date = filters.value.dateRange[1];
     }
+    if (filters.value.browser) {
+      params.browser = filters.value.browser;
+    }
+    if (filters.value.search) {
+      params.search = filters.value.search;
+    }
 
     const response = await api.get("/browser/stats", { params });
+    const statsData = response.items || [];
 
+    // ✅ 使用后端返回的统计数据进行计算
+    // 总访问次数 = 所有浏览器的访问次数之和
+    const totalVisits = statsData.reduce(
+      (sum, item) => sum + (item.visits || 0),
+      0,
+    );
+
+    // 总停留时长 = 所有浏览器的总时长之和（后端返回的是分钟，转换为秒）
+    const totalDuration = statsData.reduce(
+      (sum, item) => sum + (item.total_minutes || 0) * 60,
+      0,
+    );
+
+    // 平均停留时长
+    const avgPerVisit =
+      totalVisits > 0 ? Math.round(totalDuration / totalVisits) : 0;
+
+    // 活跃浏览器数量 = 返回的浏览器类型数量
+    const activeBrowsers = statsData.length;
+
+    stats.value = {
+      totalVisits: totalVisits,
+      totalDuration: totalDuration,
+      avgPerVisit: avgPerVisit,
+      activeBrowsers: activeBrowsers,
+    };
+  } catch (error) {
+    console.error("加载统计失败:", error);
+    // 降级：如果后端接口失败，使用当前页数据
     stats.value.totalVisits = items.value.length;
     stats.value.totalDuration = items.value.reduce(
       (sum, item) => sum + (item.duration || 0),
@@ -376,86 +412,166 @@ const loadStats = async () => {
     stats.value.avgPerVisit = items.value.length
       ? Math.round(stats.value.totalDuration / items.value.length)
       : 0;
-
-    const browsers = new Set(items.value.map((i) => i.browser));
-    stats.value.activeBrowsers = browsers.size;
-  } catch (error) {
-    console.error("加载统计失败:", error);
+    stats.value.activeBrowsers = new Set(
+      items.value.map((i) => i.browser),
+    ).size;
   }
 };
-
 // 渲染图表
-const renderCharts = () => {
+const renderCharts = async () => {
   if (!trendChartRef.value || !pieChartRef.value) return;
 
-  // 趋势图
-  if (!trendChart) {
-    trendChart = echarts.init(trendChartRef.value);
-  }
-
-  const hours = Array.from({ length: 24 }, (_, i) => `${i}时`);
-  const hourlyData = new Array(24).fill(0);
-
-  items.value.forEach((item) => {
-    if (item.visit_time) {
-      const hour = new Date(item.visit_time).getHours();
-      hourlyData[hour]++;
-    }
-  });
-
-  const trendOption = {
-    tooltip: { trigger: "axis" },
-    grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
-    xAxis: {
-      type: "category",
-      data: trendType.value === "hourly" ? hours : ["近7天"],
-      axisLabel: { rotate: 45 },
-    },
-    yAxis: { type: "value", name: "访问次数" },
-    series: [
-      {
-        name: "访问次数",
-        type: "bar",
-        data: trendType.value === "hourly" ? hourlyData : [items.value.length],
-        itemStyle: { color: "#667eea", borderRadius: [4, 4, 0, 0] },
-      },
-    ],
-  };
-  trendChart.setOption(trendOption);
-
-  // 饼图
-  if (!pieChart) {
-    pieChart = echarts.init(pieChartRef.value);
-  }
-
-  const browserCount = {};
-  items.value.forEach((item) => {
-    const browser = item.browser || "unknown";
-    browserCount[browser] = (browserCount[browser] || 0) + 1;
-  });
-
-  const pieData = Object.entries(browserCount).map(([name, value]) => ({
-    name,
-    value,
-  }));
-
-  const pieOption = {
-    tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
-    legend: { orient: "vertical", left: "left" },
-    series: [
-      {
-        type: "pie",
-        radius: ["50%", "70%"],
-        avoidLabelOverlap: false,
-        label: { show: false },
-        emphasis: { label: { show: true } },
-        data: pieData,
-      },
-    ],
-  };
-  pieChart.setOption(pieOption);
+  // ✅ 调用后端获取完整数据
+  await loadTrendData();
+  await loadDistributionData();
 };
 
+// 新增：加载趋势数据
+const loadTrendData = async () => {
+  try {
+    const params = {};
+    if (filters.value.employeeId) {
+      params.employee_id = filters.value.employeeId;
+    }
+    if (filters.value.dateRange && filters.value.dateRange.length === 2) {
+      params.start_date = filters.value.dateRange[0];
+      params.end_date = filters.value.dateRange[1];
+    }
+    if (filters.value.browser) {
+      params.browser = filters.value.browser;
+    }
+    params.type = trendType.value; // hourly 或 daily
+
+    // 调用后端趋势接口
+    const response = await api.get("/browser/trend", { params });
+
+    if (!trendChart) {
+      trendChart = echarts.init(trendChartRef.value);
+    }
+
+    const trendOption = {
+      tooltip: { trigger: "axis" },
+      grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+      xAxis: {
+        type: "category",
+        data: response.labels || [],
+        axisLabel: { rotate: 45 },
+      },
+      yAxis: { type: "value", name: "访问次数" },
+      series: [
+        {
+          name: "访问次数",
+          type: "bar",
+          data: response.data || [],
+          itemStyle: { color: "#667eea", borderRadius: [4, 4, 0, 0] },
+        },
+      ],
+    };
+    trendChart.setOption(trendOption);
+  } catch (error) {
+    console.error("加载趋势数据失败:", error);
+    // 降级：使用当前页数据
+    const hours = Array.from({ length: 24 }, (_, i) => `${i}时`);
+    const hourlyData = new Array(24).fill(0);
+    items.value.forEach((item) => {
+      if (item.visit_time) {
+        const hour = new Date(item.visit_time).getHours();
+        hourlyData[hour]++;
+      }
+    });
+
+    if (!trendChart) {
+      trendChart = echarts.init(trendChartRef.value);
+    }
+
+    trendChart.setOption({
+      tooltip: { trigger: "axis" },
+      grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+      xAxis: {
+        type: "category",
+        data: hours,
+        axisLabel: { rotate: 45 },
+      },
+      yAxis: { type: "value", name: "访问次数" },
+      series: [
+        {
+          type: "bar",
+          data: hourlyData,
+          itemStyle: { color: "#667eea", borderRadius: [4, 4, 0, 0] },
+        },
+      ],
+    });
+  }
+};
+
+// 新增：加载浏览器分布数据
+const loadDistributionData = async () => {
+  try {
+    const params = {};
+    if (filters.value.employeeId) {
+      params.employee_id = filters.value.employeeId;
+    }
+    if (filters.value.dateRange && filters.value.dateRange.length === 2) {
+      params.start_date = filters.value.dateRange[0];
+      params.end_date = filters.value.dateRange[1];
+    }
+    if (filters.value.browser) {
+      params.browser = filters.value.browser;
+    }
+
+    // 调用后端分布接口
+    const response = await api.get("/browser/distribution", { params });
+
+    if (!pieChart) {
+      pieChart = echarts.init(pieChartRef.value);
+    }
+
+    const pieOption = {
+      tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
+      legend: { orient: "vertical", left: "left" },
+      series: [
+        {
+          type: "pie",
+          radius: ["50%", "70%"],
+          avoidLabelOverlap: false,
+          label: { show: false },
+          emphasis: { label: { show: true } },
+          data: response.data || [],
+        },
+      ],
+    };
+    pieChart.setOption(pieOption);
+  } catch (error) {
+    console.error("加载分布数据失败:", error);
+    // 降级：使用当前页数据
+    const browserCount = {};
+    items.value.forEach((item) => {
+      const browser = item.browser || "unknown";
+      browserCount[browser] = (browserCount[browser] || 0) + 1;
+    });
+
+    const pieData = Object.entries(browserCount).map(([name, value]) => ({
+      name,
+      value,
+    }));
+
+    if (!pieChart) {
+      pieChart = echarts.init(pieChartRef.value);
+    }
+
+    pieChart.setOption({
+      tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
+      legend: { orient: "vertical", left: "left" },
+      series: [
+        {
+          type: "pie",
+          radius: ["50%", "70%"],
+          data: pieData,
+        },
+      ],
+    });
+  }
+};
 // 筛选变化
 const handleFilterChange = () => {
   currentPage.value = 1;

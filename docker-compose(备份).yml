@@ -1,0 +1,74 @@
+version: "3.8"
+
+services:
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: monitor-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    networks:
+      - monitor-network
+
+  # FastAPI服务器
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: monitor-server
+    environment:
+      # 使用你的外部数据库
+      - DATABASE_URL=postgresql://dh168:dh168@43.106.86.216:5432/dh168
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=26479c6b4e9c0a790ff111eb570b01d0f2253dea79fd3b2809905c84cd651cc3
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=dhkf168
+      - SCREENSHOT_DIR=/app/screenshots
+      - SCREENSHOT_FORMAT=webp
+      - SCREENSHOT_QUALITY=80
+      - SCREENSHOT_INTERVAL=60
+      - AUTO_CLEANUP_ENABLED=true
+      - CLEANUP_INTERVAL=21600
+      - SCREENSHOT_RETENTION_HOURS=48
+      - DEBUG=false
+      - LOG_LEVEL=info
+    volumes:
+      - ./screenshots:/app/screenshots
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - monitor-network
+
+  # Nginx反向代理（处理 HTTPS）
+  nginx:
+    image: nginx:alpine
+    container_name: monitor-nginx
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./dist:/usr/share/nginx/html:ro
+      - ./screenshots:/data/screenshots:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - server
+    restart: unless-stopped
+    networks:
+      - monitor-network
+
+networks:
+  monitor-network:
+    driver: bridge
+
+volumes:
+  redis_data:
+    driver: local

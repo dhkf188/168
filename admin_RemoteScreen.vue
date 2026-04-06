@@ -594,12 +594,9 @@ const connect = async () => {
     console.log("原始员工ID:", currentEmployeeId.value);
     console.log("编码后员工ID:", encodedEmployeeId);
 
-    // ===== 方案1 + 方案2 混合：先尝试 fetch =====
+    // ===== 权限检查 =====
     let checkRes = null;
-    let fetchSuccess = false;
-
     try {
-      // 先尝试 fetch（最可靠）- 使用编码后的ID
       const checkResponse = await fetch(
         `/api/remote/employees/${encodedEmployeeId}/can-view`,
         {
@@ -609,18 +606,12 @@ const connect = async () => {
           },
         },
       );
-
       if (checkResponse.ok) {
         checkRes = await checkResponse.json();
-        fetchSuccess = true;
         console.log("✅ 权限检查成功 (fetch)");
       }
     } catch (fetchError) {
-      console.warn("fetch 失败，尝试使用 api:", fetchError);
-    }
-
-    // 如果 fetch 失败，使用 api（但确保不重复添加 token）
-    if (!fetchSuccess) {
+      console.warn("fetch 失败:", fetchError);
       try {
         checkRes = await api.get(
           `/api/remote/employees/${encodedEmployeeId}/can-view`,
@@ -632,41 +623,26 @@ const connect = async () => {
       }
     }
 
-    // 检查权限结果
     if (!checkRes || !checkRes.can_view) {
       ElMessage.warning(checkRes?.reason || "无法查看该员工");
       connecting.value = false;
       return;
     }
 
-    // 更新客户端能力
     clientCapabilities.value = checkRes.capabilities || {};
-
-    // ===== 🚨 关键修复：构建正确的WebSocket URL =====
-    // 方案1：从api实例的baseURL获取后端地址（推荐）
-    let backendHost;
-    const baseURL = api.defaults.baseURL || "";
-
-    if (baseURL.startsWith("http")) {
-      // 如果baseURL是完整URL，解析出host
-      const url = new URL(baseURL);
-      backendHost = url.host;
-    } else {
-      // 如果baseURL是相对路径（如'/api'），使用当前域名但端口改为8000
-      // 注意：这里根据您的实际后端端口调整
-      backendHost = window.location.hostname + ":8000";
-    }
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/api/remote/ws/admin/${encodedEmployeeId}?token=${token}`;
 
-    console.log("正在连接WebSocket:", wsUrl);
     console.log("WebSocket连接信息:", {
-      protocol,
-      backendHost,
-      encodedEmployeeId,
+      protocol: protocol,
+      host: window.location.host,
+      wsUrl: wsUrl,
+      encodedEmployeeId: encodedEmployeeId,
       tokenLength: token.length,
     });
+
+    console.log("正在连接WebSocket:", wsUrl);
 
     // 创建WebSocket连接
     ws = new WebSocket(wsUrl);
@@ -739,121 +715,167 @@ const connect = async () => {
     // ✅ 优化：增强的 onmessage 处理，支持二进制帧
     // 在 ws.onmessage 中添加帧头解析
     ws.onmessage = async (event) => {
+      console.log("📨 收到原始消息:", {
+        type: typeof event.data,
+        isBlob: event.data instanceof Blob,
+        isString: typeof event.data === "string",
+        size: event.data.size,
+      });
       try {
-        // 检测二进制数据（JPEG直传）
+        // 处理二进制数据
         if (event.data instanceof Blob) {
           const blob = event.data;
-          console.log("📦 收到二进制数据:", {
-            size: blob.size,
-            type: blob.type,
-          });
 
-          // 验证是否为有效的JPEG（检查文件头）
-          if (blob.size > 2) {
+          if (blob.size > 20) {
+            // ✅ 至少需要20字节帧头
             try {
-              // 检查是否有帧头（前6字节是头信息）
-              const headerBytes = await blob.slice(0, 6).arrayBuffer();
+              // 读取20字节帧头
+              const headerBytes = await blob.slice(0, 20).arrayBuffer();
               const headerView = new Uint8Array(headerBytes);
 
+              const version = headerView[0];
+              const frameType = headerView[1];
+              const width = (headerView[2] << 8) | headerView[3];
+              const height = (headerView[4] << 8) | headerView[5];
+              const reserved = (headerView[6] << 8) | headerView[7];
+              const frameId =
+                (headerView[8] << 24) |
+                (headerView[9] << 16) |
+                (headerView[10] << 8) |
+                headerView[11];
+              const timestampMs =
+                (headerView[12] << 24) |
+                (headerView[13] << 16) |
+                (headerView[14] << 8) |
+                headerView[15];
+              const payloadLen =
+                (headerView[16] << 24) |
+                (headerView[17] << 16) |
+                (headerView[18] << 8) |
+                headerView[19];
+
               console.log("📋 帧头解析:", {
-                version: headerView[0],
-                frameType: headerView[1],
-                width: (headerView[2] << 8) | headerView[3],
-                height: (headerView[4] << 8) | headerView[5],
+                version,
+                frameType,
+                width,
+                height,
+                frameId,
+                timestampMs,
+                payloadLen,
               });
 
-              // 检查是否是带帧头的格式（版本号1）
-              if (headerView[0] === 1) {
-                // 解析帧头
-                const frameType = headerView[1];
-                const width = (headerView[2] << 8) | headerView[3];
-                const height = (headerView[4] << 8) | headerView[5];
-
-                // 更新屏幕尺寸
-                if (width > 0 && height > 0) {
-                  screenWidth.value = width;
-                  screenHeight.value = height;
-                  console.log(`📐 更新尺寸: ${width}x${height}`);
-                }
-
-                // 提取JPEG数据（跳过前6字节）
-                const jpegBlob = blob.slice(6);
-                console.log("🖼️ JPEG数据大小:", jpegBlob.size);
-
-                // ✅ 验证JPEG头
-                const jpegHeader = await jpegBlob.slice(0, 2).arrayBuffer();
-                const jpegView = new Uint8Array(jpegHeader);
-                if (jpegView[0] === 0xff && jpegView[1] === 0xd8) {
-                  console.log("✅ JPEG头验证通过");
-                } else {
-                  console.error(
-                    "❌ JPEG头无效:",
-                    jpegView[0].toString(16),
-                    jpegView[1].toString(16),
-                  );
-                  return;
-                }
-
-                const url = URL.createObjectURL(jpegBlob);
-                console.log("📸 创建Blob URL:", url);
-
-                if (
-                  screenImage.value &&
-                  screenImage.value.startsWith("blob:")
-                ) {
-                  console.log("🗑️ 释放旧URL:", screenImage.value);
-                  URL.revokeObjectURL(screenImage.value);
-                }
-
-                screenImage.value = url;
-                stats.value.framesReceived++;
-                stats.value.lastFrameTime = Date.now();
-                console.log("✅ 图像已设置，等待加载...");
+              // ✅ 验证 payload 长度
+              if (blob.size < 20 + payloadLen) {
+                console.warn("数据不完整，等待更多数据");
                 return;
               }
 
-              // 直接JPEG格式（无帧头）
-              const arrayBuffer = await blob.slice(0, 2).arrayBuffer();
-              const view = new Uint8Array(arrayBuffer);
-              if (view[0] === 0xff && view[1] === 0xd8) {
-                console.log("✅ 检测到直接JPEG格式");
-                const url = URL.createObjectURL(blob);
+              // 更新屏幕尺寸
+              if (width > 0 && height > 0) {
+                screenWidth.value = width;
+                screenHeight.value = height;
+              }
+
+              // 提取 payload
+              const payloadBlob = blob.slice(20, 20 + payloadLen);
+
+              // 根据帧类型处理 payload
+              // 在 ws.onmessage 中，处理完整帧
+              if (frameType === 1) {
+                // 完整帧 - payload 就是图像数据
+                const imageBlob = payloadBlob;
+                const headerBytes2 = await imageBlob.slice(0, 4).arrayBuffer();
+                const headerView2 = new Uint8Array(headerBytes2);
+
+                let mimeType = "image/jpeg";
                 if (
-                  screenImage.value &&
-                  screenImage.value.startsWith("blob:")
+                  headerView2[0] === 0x52 &&
+                  headerView2[1] === 0x49 &&
+                  headerView2[2] === 0x46 &&
+                  headerView2[3] === 0x46
                 ) {
-                  URL.revokeObjectURL(screenImage.value);
+                  mimeType = "image/webp";
+                } else if (headerView2[0] === 0xff && headerView2[1] === 0xd8) {
+                  mimeType = "image/jpeg";
                 }
-                screenImage.value = url;
-                stats.value.framesReceived++;
-                stats.value.lastFrameTime = Date.now();
-                console.log("✅ 图像已设置");
-                return;
-              } else {
-                console.error(
-                  "❌ 不是JPEG格式，前两个字节:",
-                  view[0].toString(16),
-                  view[1].toString(16),
+
+                const url = URL.createObjectURL(
+                  new Blob([await imageBlob.arrayBuffer()], { type: mimeType }),
                 );
+
+                if (
+                  screenImage.value &&
+                  screenImage.value.startsWith("blob:")
+                ) {
+                  URL.revokeObjectURL(screenImage.value);
+                }
+                screenImage.value = url;
+              } else if (frameType === 2) {
+                // 差异帧 - 需要重建完整图像
+                const payloadArray = new Uint8Array(
+                  await payloadBlob.arrayBuffer(),
+                );
+                let offset = 0;
+                const regionCount =
+                  (payloadArray[offset] << 8) | payloadArray[offset + 1];
+                offset += 2;
+                const quality = payloadArray[offset];
+                offset += 1;
+
+                console.log(`📊 差异帧: ${regionCount}个区域, 质量=${quality}`);
+
+                // TODO: 实现差异帧重建
+                // 1. 获取当前显示图像作为基础
+                // 2. 解析每个区域的 WebP 数据
+                // 3. 将区域绘制到图像上
+              } else if (frameType === 3) {
+                // 区域帧
+                const payloadArray = new Uint8Array(
+                  await payloadBlob.arrayBuffer(),
+                );
+                let offset = 0;
+                const regionCount =
+                  (payloadArray[offset] << 8) | payloadArray[offset + 1];
+                offset += 2;
+                const quality = payloadArray[offset];
+                offset += 1;
+                const bgLen =
+                  (payloadArray[offset] << 24) |
+                  (payloadArray[offset + 1] << 16) |
+                  (payloadArray[offset + 2] << 8) |
+                  payloadArray[offset + 3];
+                offset += 4;
+
+                // 提取背景图像
+                const backgroundData = payloadArray.slice(
+                  offset,
+                  offset + bgLen,
+                );
+                offset += bgLen;
+
+                console.log(
+                  `📊 区域帧: ${regionCount}个区域, 背景大小=${bgLen}`,
+                );
+
+                // TODO: 实现区域帧重建
+                // 1. 解码背景图像
+                // 2. 解析每个区域的 WebP 数据
+                // 3. 将区域绘制到背景上
               }
+
+              // 更新统计
+              if (stats.value) {
+                stats.value.framesReceived++;
+                stats.value.lastFrameTime = Date.now();
+              }
+
+              return;
             } catch (err) {
-              console.error("二进制数据验证失败:", err);
+              console.error("二进制数据解析失败:", err);
             }
           }
-
-          // 降级处理
-          try {
-            const text = await blob.text();
-            console.log("尝试解析为文本:", text.substring(0, 200));
-            const data = JSON.parse(text);
-            handleMessage(data);
-          } catch (err) {
-            console.error("二进制数据解析失败:", err);
-          }
-          return;
         }
-
-        // 文本消息处理
+        // 处理文本消息
         if (typeof event.data === "string") {
           console.log("📩 收到文本消息:", event.data.substring(0, 200));
           const data = JSON.parse(event.data);
@@ -862,15 +884,6 @@ const connect = async () => {
         }
       } catch (e) {
         console.error("消息处理失败:", e);
-        // 尝试降级处理
-        try {
-          if (typeof event.data === "string") {
-            const data = JSON.parse(event.data);
-            handleMessage(data);
-          }
-        } catch (fallbackError) {
-          console.error("降级处理也失败:", fallbackError);
-        }
       }
     };
 
@@ -1209,7 +1222,7 @@ const startHeartbeat = () => {
       });
       console.log("💓 发送心跳");
     }
-  }, 30000); // 30秒发送一次心跳
+  }, 15000); // 30秒发送一次心跳
 };
 
 const stopHeartbeat = () => {

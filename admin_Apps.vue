@@ -322,11 +322,11 @@ const loadData = async () => {
     items.value = response.items || [];
     total.value = response.total || 0;
 
-    // 加载统计
+    // 加载统计（使用后端接口）
     await loadStats();
 
-    // 渲染图表
-    renderCharts();
+    // 渲染图表（使用后端接口）
+    await renderCharts();
   } catch (error) {
     console.error("加载软件使用失败:", error);
     ElMessage.error("加载失败");
@@ -335,151 +335,346 @@ const loadData = async () => {
   }
 };
 
-// 加载统计
+// 加载统计 - 使用后端接口
 const loadStats = async () => {
-  const uniqueApps = new Set(items.value.map((i) => i.app_name));
-  stats.value.totalApps = uniqueApps.size;
-  stats.value.totalDuration = items.value.reduce(
-    (sum, item) => sum + (item.duration || 0),
-    0,
-  );
+  try {
+    const params = {};
+    if (filters.value.employeeId) {
+      params.employee_id = filters.value.employeeId;
+    }
+    if (filters.value.dateRange && filters.value.dateRange.length === 2) {
+      params.start_date = filters.value.dateRange[0];
+      params.end_date = filters.value.dateRange[1];
+    }
+    if (filters.value.appName) {
+      params.app_name = filters.value.appName;
+    }
 
-  const cpuSum = items.value.reduce(
-    (sum, item) => sum + (item.cpu_avg || 0),
-    0,
-  );
-  stats.value.avgCpu = items.value.length
-    ? Math.round(cpuSum / items.value.length)
-    : 0;
+    const response = await api.get("/apps/stats", { params });
+    const statsData = response.items || [];
 
-  const memorySum = items.value.reduce(
-    (sum, item) => sum + (item.memory_avg || 0),
-    0,
-  );
-  stats.value.avgMemory = items.value.length
-    ? Math.round(memorySum / items.value.length)
-    : 0;
+    // 总软件数
+    const totalApps = statsData.length;
+
+    // 总使用时长（秒）= 所有应用的总分钟数之和 * 60
+    const totalDuration = statsData.reduce(
+      (sum, item) => sum + (item.total_minutes || 0) * 60,
+      0,
+    );
+
+    // 平均CPU（加权平均）
+    let totalCpuWeighted = 0;
+    let totalSessions = 0;
+    statsData.forEach((item) => {
+      totalCpuWeighted += (item.avg_cpu || 0) * (item.sessions || 0);
+      totalSessions += item.sessions || 0;
+    });
+    const avgCpu =
+      totalSessions > 0 ? Math.round(totalCpuWeighted / totalSessions) : 0;
+
+    // 平均内存（加权平均）
+    let totalMemoryWeighted = 0;
+    statsData.forEach((item) => {
+      totalMemoryWeighted += (item.avg_memory_mb || 0) * (item.sessions || 0);
+    });
+    const avgMemory =
+      totalSessions > 0 ? Math.round(totalMemoryWeighted / totalSessions) : 0;
+
+    stats.value = {
+      totalApps: totalApps,
+      totalDuration: totalDuration,
+      avgCpu: avgCpu,
+      avgMemory: avgMemory,
+    };
+
+    console.log("软件统计加载成功:", stats.value);
+  } catch (error) {
+    console.error("加载软件统计失败:", error);
+    // 降级：使用当前页数据
+    const uniqueApps = new Set(items.value.map((i) => i.app_name));
+    stats.value.totalApps = uniqueApps.size;
+    stats.value.totalDuration = items.value.reduce(
+      (sum, item) => sum + (item.duration || 0),
+      0,
+    );
+    const cpuSum = items.value.reduce(
+      (sum, item) => sum + (item.cpu_avg || 0),
+      0,
+    );
+    stats.value.avgCpu = items.value.length
+      ? Math.round(cpuSum / items.value.length)
+      : 0;
+    const memorySum = items.value.reduce(
+      (sum, item) => sum + (item.memory_avg || 0),
+      0,
+    );
+    stats.value.avgMemory = items.value.length
+      ? Math.round(memorySum / items.value.length)
+      : 0;
+  }
 };
 
 // 渲染图表
-const renderCharts = () => {
+const renderCharts = async () => {
   if (!barChartRef.value || !trendChartRef.value) return;
 
-  // 软件使用TOP10柱状图
-  if (!barChart) {
-    barChart = echarts.init(barChartRef.value);
-  }
+  // 加载TOP10软件使用
+  await loadTopApps();
 
-  const appDuration = {};
-  items.value.forEach((item) => {
-    const app = item.app_name;
-    appDuration[app] = (appDuration[app] || 0) + (item.duration || 0);
-  });
+  // 加载趋势数据
+  await loadTrendData();
+};
 
-  const sortedApps = Object.entries(appDuration)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
-
-  const barOption = {
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "shadow" },
-      formatter: (params) => {
-        const data = params[0];
-        return `${data.name}<br/>使用时长: ${formatDuration(data.value)}`;
-      },
-    },
-    grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
-    xAxis: {
-      type: "value",
-      name: "使用时长(分钟)",
-      axisLabel: {
-        formatter: (value) => Math.round(value / 60) + "分钟",
-      },
-    },
-    yAxis: {
-      type: "category",
-      data: sortedApps.map(([name]) =>
-        name.length > 15 ? name.substring(0, 15) + "..." : name,
-      ),
-    },
-    series: [
-      {
-        name: "使用时长",
-        type: "bar",
-        data: sortedApps.map(([, value]) => Math.round(value / 60)),
-        itemStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [
-            { offset: 0, color: "#667eea" },
-            { offset: 1, color: "#764ba2" },
-          ]),
-          borderRadius: [0, 4, 4, 0],
-        },
-        label: {
-          show: true,
-          position: "right",
-          formatter: (params) => formatDuration(params.value * 60),
-        },
-      },
-    ],
-  };
-  barChart.setOption(barOption);
-
-  // 趋势图
-  if (!trendChart) {
-    trendChart = echarts.init(trendChartRef.value);
-  }
-
-  const hours = Array.from({ length: 24 }, (_, i) => `${i}时`);
-  const hourlyDuration = new Array(24).fill(0);
-
-  items.value.forEach((item) => {
-    if (item.start_time) {
-      const hour = new Date(item.start_time).getHours();
-      hourlyDuration[hour] += (item.duration || 0) / 60; // 转换为分钟
+// 加载TOP10软件使用
+const loadTopApps = async () => {
+  try {
+    const params = {};
+    if (filters.value.employeeId) {
+      params.employee_id = filters.value.employeeId;
     }
-  });
+    if (filters.value.dateRange && filters.value.dateRange.length === 2) {
+      params.start_date = filters.value.dateRange[0];
+      params.end_date = filters.value.dateRange[1];
+    }
+    if (filters.value.appName) {
+      params.app_name = filters.value.appName;
+    }
 
-  const trendOption = {
-    tooltip: {
-      trigger: "axis",
-      formatter: (params) => {
-        return `${params[0].name}<br/>使用时长: ${formatDuration(params[0].value * 60)}`;
-      },
-    },
-    grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
-    xAxis: {
-      type: "category",
-      data: trendType.value === "hourly" ? hours : ["近7天"],
-      axisLabel: { rotate: 45 },
-    },
-    yAxis: {
-      type: "value",
-      name: "使用时长(分钟)",
-      axisLabel: {
-        formatter: (value) => Math.round(value) + "分钟",
-      },
-    },
-    series: [
-      {
-        name: "使用时长",
-        type: "line",
-        data:
-          trendType.value === "hourly"
-            ? hourlyDuration
-            : [stats.value.totalDuration / 60],
-        smooth: true,
-        lineStyle: { color: "#667eea", width: 3 },
-        areaStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: "rgba(102, 126, 234, 0.3)" },
-            { offset: 1, color: "rgba(102, 126, 234, 0.1)" },
-          ]),
+    const response = await api.get("/apps/stats", { params });
+    const statsData = response.items || [];
+
+    // 按总时长排序，取前10
+    const sortedApps = [...statsData]
+      .sort((a, b) => (b.total_minutes || 0) - (a.total_minutes || 0))
+      .slice(0, 10);
+
+    if (!barChart) {
+      barChart = echarts.init(barChartRef.value);
+    }
+
+    const barOption = {
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "shadow" },
+        formatter: (params) => {
+          const data = params[0];
+          return `${data.name}<br/>使用时长: ${formatDuration(data.value * 60)}`;
         },
       },
-    ],
-  };
-  trendChart.setOption(trendOption);
+      grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+      xAxis: {
+        type: "value",
+        name: "使用时长(分钟)",
+        axisLabel: {
+          formatter: (value) => Math.round(value) + "分钟",
+        },
+      },
+      yAxis: {
+        type: "category",
+        data: sortedApps.map((item) =>
+          item.app_name.length > 15
+            ? item.app_name.substring(0, 15) + "..."
+            : item.app_name,
+        ),
+      },
+      series: [
+        {
+          name: "使用时长",
+          type: "bar",
+          data: sortedApps.map((item) => Math.round(item.total_minutes || 0)),
+          itemStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [
+              { offset: 0, color: "#667eea" },
+              { offset: 1, color: "#764ba2" },
+            ]),
+            borderRadius: [0, 4, 4, 0],
+          },
+          label: {
+            show: true,
+            position: "right",
+            formatter: (params) => formatDuration(params.value * 60),
+          },
+        },
+      ],
+    };
+    barChart.setOption(barOption);
+  } catch (error) {
+    console.error("加载TOP应用失败:", error);
+    // 降级：使用当前页数据
+    const appDuration = {};
+    items.value.forEach((item) => {
+      const app = item.app_name;
+      appDuration[app] = (appDuration[app] || 0) + (item.duration || 0);
+    });
+    const sortedApps = Object.entries(appDuration)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+
+    if (!barChart) {
+      barChart = echarts.init(barChartRef.value);
+    }
+
+    barChart.setOption({
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "shadow" },
+        formatter: (params) => {
+          const data = params[0];
+          return `${data.name}<br/>使用时长: ${formatDuration(data.value)}`;
+        },
+      },
+      xAxis: {
+        type: "value",
+        name: "使用时长(分钟)",
+        axisLabel: {
+          formatter: (value) => Math.round(value / 60) + "分钟",
+        },
+      },
+      yAxis: {
+        type: "category",
+        data: sortedApps.map(([name]) =>
+          name.length > 15 ? name.substring(0, 15) + "..." : name,
+        ),
+      },
+      series: [
+        {
+          name: "使用时长",
+          type: "bar",
+          data: sortedApps.map(([, value]) => Math.round(value / 60)),
+          itemStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [
+              { offset: 0, color: "#667eea" },
+              { offset: 1, color: "#764ba2" },
+            ]),
+            borderRadius: [0, 4, 4, 0],
+          },
+          label: {
+            show: true,
+            position: "right",
+            formatter: (params) => formatDuration(params.value * 60),
+          },
+        },
+      ],
+    });
+  }
+};
+
+// 加载趋势数据
+const loadTrendData = async () => {
+  try {
+    const params = {};
+    if (filters.value.employeeId) {
+      params.employee_id = filters.value.employeeId;
+    }
+    if (filters.value.dateRange && filters.value.dateRange.length === 2) {
+      params.start_date = filters.value.dateRange[0];
+      params.end_date = filters.value.dateRange[1];
+    }
+    if (filters.value.appName) {
+      params.app_name = filters.value.appName;
+    }
+    params.type = trendType.value;
+
+    const response = await api.get("/apps/trend", { params });
+
+    if (!trendChart) {
+      trendChart = echarts.init(trendChartRef.value);
+    }
+
+    const trendOption = {
+      tooltip: {
+        trigger: "axis",
+        formatter: (params) => {
+          return `${params[0].name}<br/>使用时长: ${formatDuration(params[0].value * 60)}`;
+        },
+      },
+      grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+      xAxis: {
+        type: "category",
+        data: response.labels || [],
+        axisLabel: { rotate: 45 },
+      },
+      yAxis: {
+        type: "value",
+        name: "使用时长(分钟)",
+        axisLabel: {
+          formatter: (value) => Math.round(value) + "分钟",
+        },
+      },
+      series: [
+        {
+          name: "使用时长",
+          type: "line",
+          data: response.data || [],
+          smooth: true,
+          lineStyle: { color: "#667eea", width: 3 },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: "rgba(102, 126, 234, 0.3)" },
+              { offset: 1, color: "rgba(102, 126, 234, 0.1)" },
+            ]),
+          },
+        },
+      ],
+    };
+    trendChart.setOption(trendOption);
+  } catch (error) {
+    console.error("加载趋势数据失败:", error);
+    // 降级：使用当前页数据
+    const hours = Array.from({ length: 24 }, (_, i) => `${i}时`);
+    const hourlyDuration = new Array(24).fill(0);
+
+    items.value.forEach((item) => {
+      if (item.start_time) {
+        const hour = new Date(item.start_time).getHours();
+        hourlyDuration[hour] += (item.duration || 0) / 60;
+      }
+    });
+
+    if (!trendChart) {
+      trendChart = echarts.init(trendChartRef.value);
+    }
+
+    trendChart.setOption({
+      tooltip: {
+        trigger: "axis",
+        formatter: (params) => {
+          return `${params[0].name}<br/>使用时长: ${formatDuration(params[0].value * 60)}`;
+        },
+      },
+      grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+      xAxis: {
+        type: "category",
+        data: trendType.value === "hourly" ? hours : ["近7天"],
+        axisLabel: { rotate: 45 },
+      },
+      yAxis: {
+        type: "value",
+        name: "使用时长(分钟)",
+        axisLabel: {
+          formatter: (value) => Math.round(value) + "分钟",
+        },
+      },
+      series: [
+        {
+          name: "使用时长",
+          type: "line",
+          data:
+            trendType.value === "hourly"
+              ? hourlyDuration
+              : [stats.value.totalDuration / 60],
+          smooth: true,
+          lineStyle: { color: "#667eea", width: 3 },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: "rgba(102, 126, 234, 0.3)" },
+              { offset: 1, color: "rgba(102, 126, 234, 0.1)" },
+            ]),
+          },
+        },
+      ],
+    });
+  }
 };
 
 // 筛选变化

@@ -6,16 +6,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // 代理 API 请求到后端
+      // 代理所有 /api 请求（包括 WebSocket）
       "/api": {
         target: "http://localhost:8000",
         changeOrigin: true,
-      },
-      // 代理远程屏幕 WebSocket
-      "/api/remote/ws": {
-        target: "ws://localhost:8000",
-        ws: true,
-        changeOrigin: true,
+        ws: true, // ✅ 启用 WebSocket 代理
       },
     },
   },

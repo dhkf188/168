@@ -111,6 +111,7 @@
               class="alert"
             />
 
+            <!-- ========== 现有截图清理配置 ========== -->
             <el-form :model="cleanupSettings" label-width="140px">
               <el-form-item label="启用自动清理">
                 <el-switch v-model="cleanupSettings.enabled" />
@@ -144,18 +145,17 @@
                 <span class="help-text">每天固定时间执行清理</span>
               </el-form-item>
 
-              <!-- 清理策略的保存按钮 -->
               <el-form-item>
                 <el-button
                   type="primary"
                   @click="saveCleanupSettings"
                   :loading="savingCleanup"
                 >
-                  保存清理策略
+                  保存截图清理策略
                 </el-button>
               </el-form-item>
 
-              <el-form-item label="立即清理">
+              <el-form-item label="立即清理截图">
                 <el-button
                   type="danger"
                   @click="manualCleanup"
@@ -169,6 +169,157 @@
 
             <el-divider />
 
+            <!-- ========== 🆕 新增：其他表清理策略 ========== -->
+            <h3 class="section-title">其他数据清理策略</h3>
+
+            <el-alert
+              title="定期清理历史数据，优化数据库性能"
+              type="warning"
+              :closable="false"
+              show-icon
+              class="alert"
+            />
+
+            <el-table
+              :data="otherCleanupPolicies"
+              stripe
+              style="width: 100%; margin-top: 20px"
+              v-loading="loadingPolicies"
+            >
+              <el-table-column prop="table_name" label="数据表" width="150">
+                <template #default="{ row }">
+                  <span>{{ getTableNameCN(row.table_name) }}</span>
+                </template>
+              </el-table-column>
+
+              <el-table-column label="状态" width="100">
+                <template #default="{ row }">
+                  <el-switch
+                    v-model="row.enabled"
+                    @change="updatePolicy(row)"
+                  />
+                </template>
+              </el-table-column>
+
+              <el-table-column label="保留策略" min-width="200">
+                <template #default="{ row }">
+                  <el-input-number
+                    v-if="row.retention_hours"
+                    v-model="row.retention_hours"
+                    :min="1"
+                    :max="720"
+                    size="small"
+                    @change="updatePolicy(row)"
+                  />
+                  <el-input-number
+                    v-else
+                    v-model="row.retention_days"
+                    :min="1"
+                    :max="365"
+                    size="small"
+                    @change="updatePolicy(row)"
+                  />
+                  <span class="unit">{{
+                    row.retention_hours ? "小时" : "天"
+                  }}</span>
+                </template>
+              </el-table-column>
+
+              <el-table-column label="优先级" width="100">
+                <template #default="{ row }">
+                  <el-input-number
+                    v-model="row.priority"
+                    :min="1"
+                    :max="10"
+                    size="small"
+                    @change="updatePolicy(row)"
+                  />
+                </template>
+              </el-table-column>
+
+              <el-table-column label="上次清理" width="180">
+                <template #default="{ row }">
+                  {{ formatDateTime(row.last_cleaned_at) || "从未" }}
+                </template>
+              </el-table-column>
+
+              <el-table-column label="清理数量" width="100">
+                <template #default="{ row }">
+                  {{ row.cleaned_count || 0 }}
+                </template>
+              </el-table-column>
+
+              <el-table-column label="当前数据量" width="100">
+                <template #default="{ row }">
+                  <el-tag size="small" type="info">{{
+                    row.current_count || 0
+                  }}</el-tag>
+                </template>
+              </el-table-column>
+            </el-table>
+
+            <el-divider />
+
+            <div class="form-actions">
+              <el-button
+                type="primary"
+                @click="manualCleanupAll"
+                :loading="cleaningAll"
+              >
+                <el-icon><Delete /></el-icon>立即全面清理
+              </el-button>
+              <el-button
+                @click="loadAllCleanupPolicies"
+                :loading="loadingPolicies"
+              >
+                <el-icon><Refresh /></el-icon>刷新策略
+              </el-button>
+              <el-button @click="getCleanupRecommendations">
+                <el-icon><DataAnalysis /></el-icon>清理建议
+              </el-button>
+            </div>
+
+            <!-- 清理建议对话框 -->
+            <el-dialog
+              v-model="recommendationsVisible"
+              title="清理建议"
+              width="500px"
+            >
+              <div v-if="recommendations.length > 0">
+                <el-alert
+                  v-for="(rec, idx) in recommendations"
+                  :key="idx"
+                  :title="rec.message"
+                  :type="rec.table === 'disk' ? 'warning' : 'info'"
+                  :closable="false"
+                  show-icon
+                  style="margin-bottom: 12px"
+                >
+                  <template v-if="rec.table">
+                    <div>当前数据量: {{ rec.current_count }} 条</div>
+                    <div>
+                      建议保留: {{ rec.suggestion || `${rec.threshold} 天` }}
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div>剩余空间: {{ rec.free_gb }} GB</div>
+                    <div>建议立即清理或扩容</div>
+                  </template>
+                </el-alert>
+              </div>
+              <div v-else>
+                <el-empty description="暂无清理建议" />
+              </div>
+              <template #footer>
+                <el-button @click="recommendationsVisible = false"
+                  >关闭</el-button
+                >
+              </template>
+            </el-dialog>
+
+            <!-- ========== 现有清理状态显示 ========== -->
+            <el-divider />
+
             <h4>当前清理状态</h4>
             <el-descriptions :column="2" border>
               <el-descriptions-item label="自动清理状态">
@@ -176,7 +327,7 @@
                   {{ cleanupStatus.enabled ? "已启用" : "已禁用" }}
                 </el-tag>
               </el-descriptions-item>
-              <el-descriptions-item label="保留时间">
+              <el-descriptions-item label="截图保留时间">
                 {{ cleanupStatus.retention_hours }}小时
               </el-descriptions-item>
               <el-descriptions-item label="清理间隔">
@@ -188,11 +339,11 @@
               <el-descriptions-item label="上次清理时间">
                 {{ cleanupStatus.last_cleanup || "从未" }}
               </el-descriptions-item>
-              <el-descriptions-item label="待清理数量">
-                {{ cleanupStatus.pending_cleanup }} 张
-              </el-descriptions-item>
-              <el-descriptions-item label="待清理大小">
-                {{ cleanupStatus.pending_size_mb }} MB
+              <el-descriptions-item label="待清理截图">
+                {{ cleanupStatus.pending_cleanup }} 张 ({{
+                  cleanupStatus.pending_size_mb
+                }}
+                MB)
               </el-descriptions-item>
             </el-descriptions>
           </div>
@@ -584,12 +735,15 @@ import {
   DataLine,
   Lock,
   Message,
+  Refresh,
+  DataAnalysis,
 } from "@element-plus/icons-vue";
 import { cleanupApi } from "./admin_api";
 import api from "./admin_api";
 import dayjs from "dayjs";
 import { useRouter } from "vue-router";
 import { useUserStore } from "./admin_stores";
+import { formatDateTime } from "./admin_timezone";
 
 const router = useRouter();
 const userStore = useUserStore();
@@ -736,6 +890,181 @@ const notificationSettings = ref({
   },
 });
 
+// ========== 新增：其他表清理策略 ==========
+const otherCleanupPolicies = ref([]);
+const loadingPolicies = ref(false);
+const cleaningAll = ref(false);
+const recommendationsVisible = ref(false);
+const recommendations = ref([]);
+
+// 表名中文映射
+const getTableNameCN = (tableName) => {
+  const map = {
+    screenshots: "截图记录",
+    browser_history: "浏览器历史",
+    activities: "活动日志",
+    app_usage: "软件使用记录",
+    file_operations: "文件操作记录",
+    notifications: "通知记录",
+    clients_offline: "离线客户端",
+  };
+  return map[tableName] || tableName;
+};
+
+// 加载所有清理策略
+const loadAllCleanupPolicies = async () => {
+  loadingPolicies.value = true;
+  try {
+    const response = await api.get("/cleanup/policies");
+    const allPolicies = response.items || [];
+
+    // 分离截图策略和其他策略
+    const screenshotPolicy = allPolicies.find(
+      (p) => p.table_name === "screenshots",
+    );
+    otherCleanupPolicies.value = allPolicies.filter(
+      (p) => p.table_name !== "screenshots",
+    );
+
+    // 如果有截图策略，更新到 cleanupSettings
+    if (screenshotPolicy) {
+      cleanupSettings.value = {
+        enabled: screenshotPolicy.enabled,
+        retentionHours: screenshotPolicy.retention_hours || 48,
+        interval: screenshotPolicy.retention_days || 6,
+        cleanupTime: screenshotPolicy.cleanup_time ? new Date() : null,
+      };
+    }
+
+    console.log("清理策略加载成功:", {
+      screenshot: screenshotPolicy,
+      others: otherCleanupPolicies.value.length,
+    });
+  } catch (error) {
+    console.error("加载清理策略失败:", error);
+    ElMessage.error("加载清理策略失败");
+  } finally {
+    loadingPolicies.value = false;
+  }
+};
+
+// 更新单个清理策略
+const updatePolicy = async (policy) => {
+  try {
+    await api.put(`/cleanup/policies/${policy.id}`, {
+      enabled: policy.enabled,
+      retention_days: policy.retention_days,
+      retention_hours: policy.retention_hours,
+      priority: policy.priority,
+    });
+    ElMessage.success(`${getTableNameCN(policy.table_name)} 策略已更新`);
+  } catch (error) {
+    console.error("更新策略失败:", error);
+    ElMessage.error("更新失败");
+    // 重新加载恢复原值
+    await loadAllCleanupPolicies();
+  }
+};
+
+// 手动全面清理
+const manualCleanupAll = async () => {
+  ElMessageBox.confirm(
+    "确定要立即清理所有过期数据吗？\n\n这将删除：\n- 过期的截图文件\n- 过期的浏览器历史\n- 过期的活动日志\n- 过期的软件使用记录\n- 过期的文件操作记录\n- 已删除超过7天的通知",
+    "确认全面清理",
+    {
+      confirmButtonText: "确定清理",
+      cancelButtonText: "取消",
+      type: "warning",
+      dangerouslyUseHTMLString: true,
+    },
+  ).then(async () => {
+    cleaningAll.value = true;
+    try {
+      await api.post("/cleanup/now");
+      ElMessage.success("全面清理任务已启动，请稍后查看清理状态");
+
+      // 3秒后刷新状态
+      setTimeout(() => {
+        loadCleanupStatus();
+        loadAllCleanupPolicies();
+      }, 3000);
+    } catch (error) {
+      console.error("全面清理失败:", error);
+      ElMessage.error("清理任务启动失败");
+    } finally {
+      cleaningAll.value = false;
+    }
+  });
+};
+
+// 获取清理建议
+const getCleanupRecommendations = async () => {
+  try {
+    const response = await api.get("/cleanup/recommendations");
+    recommendations.value = response.recommendations || [];
+    recommendationsVisible.value = true;
+  } catch (error) {
+    console.error("获取清理建议失败:", error);
+    ElMessage.error("获取清理建议失败");
+  }
+};
+
+// 修改现有的 saveCleanupSettings 以保存截图策略 - xb
+const saveCleanupSettings = async () => {
+  savingCleanup.value = true;
+  try {
+    // 找到截图策略的 ID
+    const screenshotPolicy = otherCleanupPolicies.value.find(
+      (p) => p.table_name === "screenshots",
+    );
+
+    if (screenshotPolicy) {
+      // 更新截图策略
+      await api.put(`/cleanup/policies/${screenshotPolicy.id}`, {
+        enabled: cleanupSettings.value.enabled,
+        retention_hours: cleanupSettings.value.retentionHours,
+        priority: 1, // 截图策略优先级最高
+      });
+
+      // 同时更新系统配置（保持兼容）
+      await api.post("/settings/cleanup", {
+        enabled: cleanupSettings.value.enabled,
+        retention_hours: cleanupSettings.value.retentionHours,
+        interval_hours: cleanupSettings.value.interval,
+        cleanup_time: cleanupSettings.value.cleanupTime
+          ? dayjs(cleanupSettings.value.cleanupTime).format("HH:mm")
+          : null,
+      });
+
+      ElMessage.success("截图清理策略已保存");
+      await loadAllCleanupPolicies(); // 重新加载所有策略
+      await loadCleanupStatus(); // 刷新清理状态
+    } else {
+      // 如果找不到截图策略，使用原有方式
+      const cleanupTimeStr = cleanupSettings.value.cleanupTime
+        ? dayjs(cleanupSettings.value.cleanupTime).format("HH:mm")
+        : null;
+
+      await api.post("/settings/cleanup", {
+        enabled: cleanupSettings.value.enabled,
+        retention_hours: cleanupSettings.value.retentionHours,
+        interval_hours: cleanupSettings.value.interval,
+        cleanup_time: cleanupTimeStr,
+      });
+
+      ElMessage.success("截图清理策略已保存");
+      await loadAllCleanupPolicies();
+      await loadCleanupStatus();
+    }
+  } catch (error) {
+    console.error("保存清理策略失败:", error);
+    ElMessage.error(
+      "保存失败: " + (error.response?.data?.detail || "未知错误"),
+    );
+  } finally {
+    savingCleanup.value = false;
+  }
+};
 // ==================== API 调用函数 ====================
 
 // 加载所有设置
@@ -829,34 +1158,6 @@ const saveGeneralSettings = async () => {
     );
   } finally {
     savingGeneral.value = false;
-  }
-};
-
-// 保存清理策略（包含清理时间）
-const saveCleanupSettings = async () => {
-  savingCleanup.value = true;
-  try {
-    // 格式化清理时间
-    const cleanupTimeStr = cleanupSettings.value.cleanupTime
-      ? dayjs(cleanupSettings.value.cleanupTime).format("HH:mm")
-      : null;
-
-    await api.post("/settings/cleanup", {
-      enabled: cleanupSettings.value.enabled,
-      retention_hours: cleanupSettings.value.retentionHours,
-      interval_hours: cleanupSettings.value.interval,
-      cleanup_time: cleanupTimeStr, // 添加清理时间
-    });
-    ElMessage.success("清理策略已保存");
-    await loadAllSettings(); // ✅ 重新加载数据
-    await loadCleanupStatus(); // 刷新清理状态
-  } catch (error) {
-    console.error("保存清理策略失败:", error);
-    ElMessage.error(
-      "保存失败: " + (error.response?.data?.detail || "未知错误"),
-    );
-  } finally {
-    savingCleanup.value = false;
   }
 };
 
@@ -1082,7 +1383,6 @@ const changePassword = async () => {
       };
 
       passwordDialogVisible.value = false;
-
     } else {
       ElMessage.success("密码修改成功，请重新登录");
 
@@ -1091,14 +1391,10 @@ const changePassword = async () => {
         router.push("/login");
       }, 1500);
     }
-
   } catch (error) {
     console.error("修改密码失败:", error);
 
-    ElMessage.error(
-      error.response?.data?.detail || "密码修改失败，请重试"
-    );
-
+    ElMessage.error(error.response?.data?.detail || "密码修改失败，请重试");
   } finally {
     changingPassword.value = false;
   }

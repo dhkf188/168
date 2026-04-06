@@ -27,6 +27,9 @@ from server_timezone import (
 )
 
 
+# server_models.py - 修改 User 类
+
+
 class User(Base):
     """用户表（管理员）"""
 
@@ -35,26 +38,59 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
-    role = Column(String(20), default="user")  # admin, user
+    role = Column(String(20), default="user")  # 保留兼容性
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_login = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, default=True)
-    password_changed_at = Column(DateTime(timezone=True), nullable=True)  # 新增字段
+    password_changed_at = Column(DateTime(timezone=True), nullable=True)
+    permissions = Column(JSON, default={"type": "none"})
+    department = Column(String(100), nullable=True)
+    phone = Column(String(20), nullable=True)
+    email = Column(String(100), nullable=True)
+    last_ip = Column(String(45), nullable=True)
+
+    # 关联
+    role_rel = relationship("Role", back_populates="users")
+    notifications = relationship("Notification", back_populates="user")
 
     def to_dict(self):
         return {
             "id": self.id,
             "username": self.username,
             "role": self.role,
+            "role_id": self.role_id,
+            "role_name": self.role_rel.display_name if self.role_rel else None,
+            "department": self.department,
+            "phone": self.phone,
+            "email": self.email,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_login": self.last_login.isoformat() if self.last_login else None,
+            "last_ip": self.last_ip,
             "is_active": self.is_active,
-            "password_changed_at": (
-                self.password_changed_at.isoformat()
-                if self.password_changed_at
-                else None
-            ),
+            "permissions": self.effective_permissions,
         }
+
+    @property
+    def effective_permissions(self):
+        """获取有效权限（角色权限 + 用户自定义权限覆盖）"""
+        # 获取角色权限
+        role_perms = self.role_rel.permissions if self.role_rel else {"type": "none"}
+
+        # 获取用户自定义权限
+        user_perms = self.permissions if self.permissions else {"type": "none"}
+
+        # ✅ 修复：只有当用户有实际的自定义权限列表时才覆盖
+        # 检查用户权限类型是否为 "custom" 且有具体的权限列表
+        if (
+            user_perms.get("type") == "custom"
+            and user_perms.get("permissions")
+            and len(user_perms.get("permissions", [])) > 0
+        ):
+            return user_perms
+
+        # 否则返回角色权限
+        return role_perms
 
 
 class Employee(Base):
@@ -520,6 +556,7 @@ class Notification(Base):
     category = Column(String(50), default="system")  # system, client, cleanup, backup
     is_read = Column(Boolean, default=False)
     is_deleted = Column(Boolean, default=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     read_at = Column(DateTime(timezone=True), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)
@@ -572,7 +609,7 @@ class BrowserHistory(Base):
     employee_id = Column(
         String(100),
         ForeignKey("employees.employee_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     client_id = Column(
@@ -617,7 +654,7 @@ class AppUsage(Base):
     employee_id = Column(
         String(100),
         ForeignKey("employees.employee_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     client_id = Column(
@@ -668,7 +705,7 @@ class FileOperation(Base):
     employee_id = Column(
         String(100),
         ForeignKey("employees.employee_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     client_id = Column(
@@ -724,3 +761,233 @@ class FileOperation(Base):
             "copy": "复制",
         }
         return ops.get(op, op)
+
+
+# server_models.py - 在文件末尾添加
+
+
+class CleanupPolicy(Base):
+    """清理策略配置表"""
+
+    __tablename__ = "cleanup_policies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    table_name = Column(String(50), unique=True, nullable=False, index=True)
+    enabled = Column(Boolean, default=True)
+    retention_days = Column(Integer, nullable=True)  # 保留天数
+    retention_hours = Column(Integer, nullable=True)  # 保留小时（截图专用）
+    priority = Column(Integer, default=5)  # 优先级 1-10
+    last_cleaned_at = Column(DateTime(timezone=True), nullable=True)
+    cleaned_count = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "table_name": self.table_name,
+            "enabled": self.enabled,
+            "retention_days": self.retention_days,
+            "retention_hours": self.retention_hours,
+            "priority": self.priority,
+            "last_cleaned_at": (
+                self.last_cleaned_at.isoformat() if self.last_cleaned_at else None
+            ),
+            "cleaned_count": self.cleaned_count,
+        }
+
+
+# server_models.py - 添加以下内容到文件末尾
+
+
+class Role(Base):
+    """角色表"""
+
+    __tablename__ = "roles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), unique=True, nullable=False, index=True)
+    display_name = Column(String(100), nullable=False)
+    description = Column(String(500))
+    permissions = Column(JSON, default={"type": "none"})
+    is_system = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # 关联
+    users = relationship("User", back_populates="role_rel")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "display_name": self.display_name,
+            "description": self.description,
+            "permissions": self.permissions,
+            "is_system": self.is_system,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class Permission(Base):
+    """权限表"""
+
+    __tablename__ = "permissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(100), unique=True, nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), index=True)
+    description = Column(String(500))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# ==================== 考勤管理模型 ====================
+
+
+class AttendanceEmployee(Base):
+    """考勤员工表"""
+
+    __tablename__ = "attendance_employees"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    employee_id = Column(String(100), unique=True, nullable=False, index=True)
+    hire_date = Column(DateTime(timezone=True), nullable=True)
+    work_location = Column(String(50), default="现场")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    position = Column(String(100), nullable=True)
+
+    # 关联
+    attendance_records = relationship(
+        "AttendanceRecord", back_populates="employee", cascade="all, delete-orphan"
+    )
+    performances = relationship(
+        "Performance", back_populates="employee", cascade="all, delete-orphan"
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "employee_id": self.employee_id,
+            "hire_date": (
+                self.hire_date.strftime("%Y-%m-%d") if self.hire_date else None
+            ),
+            "work_location": self.work_location,
+            "is_active": self.is_active,
+            "position": self.position,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class AttendanceRecord(Base):
+    """考勤记录表"""
+
+    __tablename__ = "attendance_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(
+        Integer,
+        ForeignKey("attendance_employees.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    record_date = Column(DateTime(timezone=True), nullable=False, index=True)
+    status = Column(String(20), default="work")
+    remark = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # 关联
+    employee = relationship("AttendanceEmployee", back_populates="attendance_records")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "employee_id": self.employee_id,
+            "record_date": (
+                self.record_date.strftime("%Y-%m-%d") if self.record_date else None
+            ),
+            "status": self.status,
+            "remark": self.remark,
+        }
+
+
+# server_models.py - 在 AttendanceRecord 模型之后添加
+
+# server_models.py - 在 AttendanceRecord 模型之后添加
+
+
+class Performance(Base):
+    """绩效考核表"""
+
+    __tablename__ = "performances"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(
+        Integer,
+        ForeignKey("attendance_employees.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    month = Column(String(7), nullable=False, index=True)  # YYYY-MM
+    total_score = Column(Integer, default=10)
+    grade = Column(String(20), default="合格")
+    score_records = Column(JSON, default=[])  # 加减分记录
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # 关联
+    employee = relationship("AttendanceEmployee", back_populates="performances")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "employee_id": self.employee_id,
+            "employee_name": self.employee.name if self.employee else None,
+            "position": getattr(self.employee, "position", None),
+            "month": self.month,
+            "total_score": self.total_score,
+            "grade": self.grade,
+            "score_records": self.score_records or [],
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class PenaltyRecord(Base):
+    """罚款记录表"""
+
+    __tablename__ = "penalty_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(
+        Integer,
+        ForeignKey("attendance_employees.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    penalty_date = Column(DateTime(timezone=True), nullable=False)
+    amount = Column(Integer, nullable=False)
+    category = Column(String(50), nullable=False)
+    reason = Column(String(500), nullable=False)
+    created_by = Column(String(50), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # 关联
+    employee = relationship("AttendanceEmployee", backref="penalty_records")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "employee_id": self.employee_id,
+            "penalty_date": (
+                self.penalty_date.strftime("%Y-%m-%d") if self.penalty_date else None
+            ),
+            "amount": self.amount,
+            "category": self.category,
+            "reason": self.reason,
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

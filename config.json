@@ -1,8 +1,5 @@
 {
-  "server_urls": [
-    "http://localhost:8000",
-    "https://your-server.onrender.com"
-  ],
+  "server_urls": ["http://localhost:8000", "https://your-server.onrender.com"],
   "interval": 300,
   "quality": 80,
   "format": "webp",
@@ -17,5 +14,9 @@
   "retry_times": 3,
   "retry_delay": 1,
   "encryption_enabled": false,
-  "last_update": "2026-03-09T16:18:29.075670"
+  "last_update": "2026-03-09T16:18:29.075670",
+  "enable_browser_monitor": true,
+  "enable_app_monitor": true,
+  "enable_file_monitor": true,
+  "enable_remote_screen": true
 }

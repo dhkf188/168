@@ -206,6 +206,14 @@ def validate_beijing_time(dt: datetime) -> bool:
     return True
 
 
+def serialize_datetime(dt: Optional[datetime]) -> Optional[str]:
+    """序列化datetime为ISO格式字符串（输出北京时间）"""
+    if dt is None:
+        return None
+    beijing_time = to_beijing_time(dt)
+    return beijing_time.strftime("%Y-%m-%d %H:%M:%S")
+
+
 # 为了方便，直接导出常用函数
 __all__ = [
     "UTC",

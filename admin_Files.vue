@@ -344,11 +344,11 @@ const loadData = async () => {
     items.value = response.items || [];
     total.value = response.total || 0;
 
-    // 加载统计
+    // 加载统计（使用后端接口）
     await loadStats();
 
-    // 渲染图表
-    renderCharts();
+    // 渲染图表（使用后端接口）
+    await renderCharts();
   } catch (error) {
     console.error("加载文件操作失败:", error);
     ElMessage.error("加载失败");
@@ -357,20 +357,43 @@ const loadData = async () => {
   }
 };
 
-// 加载统计
+// 加载统计 - 使用后端接口
 const loadStats = async () => {
-  const params = {};
-  if (filters.value.employeeId) {
-    params.employee_id = filters.value.employeeId;
-  }
-  if (filters.value.dateRange && filters.value.dateRange.length === 2) {
-    params.start_date = filters.value.dateRange[0];
-    params.end_date = filters.value.dateRange[1];
-  }
-
   try {
-    const response = await api.get("/files/stats", { params });
+    const params = {};
+    if (filters.value.employeeId) {
+      params.employee_id = filters.value.employeeId;
+    }
+    if (filters.value.dateRange && filters.value.dateRange.length === 2) {
+      params.start_date = filters.value.dateRange[0];
+      params.end_date = filters.value.dateRange[1];
+    }
 
+    const response = await api.get("/files/stats", { params });
+    const statsData = response || {};
+
+    // 使用后端返回的统计
+    stats.value.totalOperations = (statsData.by_operation || []).reduce(
+      (sum, item) => sum + (item.count || 0),
+      0,
+    );
+
+    stats.value.creates =
+      (statsData.by_operation || []).find((item) => item.operation === "create")
+        ?.count || 0;
+
+    stats.value.modifies =
+      (statsData.by_operation || []).find((item) => item.operation === "modify")
+        ?.count || 0;
+
+    stats.value.deletes =
+      (statsData.by_operation || []).find((item) => item.operation === "delete")
+        ?.count || 0;
+
+    console.log("文件统计加载成功:", stats.value);
+  } catch (error) {
+    console.error("加载文件统计失败:", error);
+    // 降级：使用当前页数据
     stats.value.totalOperations = items.value.length;
     stats.value.creates = items.value.filter(
       (i) => i.operation === "create",
@@ -381,109 +404,201 @@ const loadStats = async () => {
     stats.value.deletes = items.value.filter(
       (i) => i.operation === "delete",
     ).length;
-  } catch (error) {
-    console.error("加载统计失败:", error);
   }
 };
 
-// 渲染图表
-const renderCharts = () => {
+// 渲染图表 - 使用后端接口
+const renderCharts = async () => {
   if (!pieChartRef.value || !barChartRef.value) return;
 
-  // 饼图
-  if (!pieChart) {
-    pieChart = echarts.init(pieChartRef.value);
-  }
+  // 加载操作分布数据
+  await loadOperationDistribution();
 
-  const opCount = {
-    create: items.value.filter((i) => i.operation === "create").length,
-    modify: items.value.filter((i) => i.operation === "modify").length,
-    delete: items.value.filter((i) => i.operation === "delete").length,
-    other: items.value.filter(
-      (i) => !["create", "modify", "delete"].includes(i.operation),
-    ).length,
-  };
+  // 加载文件类型TOP10数据
+  await loadFileTypeTop10();
+};
 
-  const pieOption = {
-    tooltip: {
-      trigger: "item",
-      formatter: "{b}: {c} ({d}%)",
-    },
-    legend: { orient: "vertical", left: "left" },
-    series: [
-      {
-        type: "pie",
-        radius: ["50%", "70%"],
-        avoidLabelOverlap: false,
-        label: { show: false },
-        emphasis: { label: { show: true } },
-        data: [
-          {
-            value: opCount.create,
-            name: "创建",
-            itemStyle: { color: "#52c41a" },
-          },
-          {
-            value: opCount.modify,
-            name: "修改",
-            itemStyle: { color: "#fa8c16" },
-          },
-          {
-            value: opCount.delete,
-            name: "删除",
-            itemStyle: { color: "#ff4d4f" },
-          },
-          {
-            value: opCount.other,
-            name: "其他",
-            itemStyle: { color: "#909399" },
-          },
-        ],
+// 加载操作分布数据
+const loadOperationDistribution = async () => {
+  try {
+    const params = {};
+    if (filters.value.employeeId) {
+      params.employee_id = filters.value.employeeId;
+    }
+    if (filters.value.dateRange && filters.value.dateRange.length === 2) {
+      params.start_date = filters.value.dateRange[0];
+      params.end_date = filters.value.dateRange[1];
+    }
+
+    const response = await api.get("/files/stats", { params });
+    const statsData = response || {};
+    const operations = statsData.by_operation || [];
+
+    if (!pieChart) {
+      pieChart = echarts.init(pieChartRef.value);
+    }
+
+    // 操作分布数据
+    const opMap = {
+      create: { name: "创建", color: "#52c41a" },
+      modify: { name: "修改", color: "#fa8c16" },
+      delete: { name: "删除", color: "#ff4d4f" },
+    };
+
+    const pieData = [];
+    for (const op of operations) {
+      if (opMap[op.operation]) {
+        pieData.push({
+          value: op.count,
+          name: opMap[op.operation].name,
+          itemStyle: { color: opMap[op.operation].color },
+        });
+      } else {
+        pieData.push({
+          value: op.count,
+          name: op.operation_cn || op.operation || "其他",
+          itemStyle: { color: "#909399" },
+        });
+      }
+    }
+
+    const pieOption = {
+      tooltip: {
+        trigger: "item",
+        formatter: "{b}: {c} ({d}%)",
       },
-    ],
-  };
-  pieChart.setOption(pieOption);
-
-  // 文件类型TOP10柱状图
-  if (!barChart) {
-    barChart = echarts.init(barChartRef.value);
-  }
-
-  const typeCount = {};
-  items.value.forEach((item) => {
-    const type = item.file_type || "其他";
-    typeCount[type] = (typeCount[type] || 0) + 1;
-  });
-
-  const sortedTypes = Object.entries(typeCount)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
-
-  const barOption = {
-    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
-    grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
-    xAxis: {
-      type: "category",
-      data: sortedTypes.map(([type]) => type),
-      axisLabel: { rotate: 45 },
-    },
-    yAxis: { type: "value", name: "操作次数" },
-    series: [
-      {
-        name: "操作次数",
-        type: "bar",
-        data: sortedTypes.map(([, count]) => count),
-        itemStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: "#667eea" },
-            { offset: 1, color: "#764ba2" },
-          ]),
-          borderRadius: [4, 4, 0, 0],
+      legend: { orient: "vertical", left: "left" },
+      series: [
+        {
+          type: "pie",
+          radius: ["50%", "70%"],
+          avoidLabelOverlap: false,
+          label: { show: false },
+          emphasis: { label: { show: true } },
+          data: pieData,
         },
+      ],
+    };
+    pieChart.setOption(pieOption);
+  } catch (error) {
+    console.error("加载操作分布失败:", error);
+    // 降级：使用当前页数据
+    const opCount = {
+      create: items.value.filter((i) => i.operation === "create").length,
+      modify: items.value.filter((i) => i.operation === "modify").length,
+      delete: items.value.filter((i) => i.operation === "delete").length,
+      other: items.value.filter(
+        (i) => !["create", "modify", "delete"].includes(i.operation),
+      ).length,
+    };
+
+    if (!pieChart) {
+      pieChart = echarts.init(pieChartRef.value);
+    }
+
+    pieChart.setOption({
+      series: [
+        {
+          data: [
+            {
+              value: opCount.create,
+              name: "创建",
+              itemStyle: { color: "#52c41a" },
+            },
+            {
+              value: opCount.modify,
+              name: "修改",
+              itemStyle: { color: "#fa8c16" },
+            },
+            {
+              value: opCount.delete,
+              name: "删除",
+              itemStyle: { color: "#ff4d4f" },
+            },
+            {
+              value: opCount.other,
+              name: "其他",
+              itemStyle: { color: "#909399" },
+            },
+          ],
+        },
+      ],
+    });
+  }
+};
+
+// 加载文件类型TOP10
+const loadFileTypeTop10 = async () => {
+  try {
+    const params = {};
+    if (filters.value.employeeId) {
+      params.employee_id = filters.value.employeeId;
+    }
+    if (filters.value.dateRange && filters.value.dateRange.length === 2) {
+      params.start_date = filters.value.dateRange[0];
+      params.end_date = filters.value.dateRange[1];
+    }
+
+    const response = await api.get("/files/stats", { params });
+    const statsData = response || {};
+    const fileTypes = statsData.by_file_type || [];
+
+    if (!barChart) {
+      barChart = echarts.init(barChartRef.value);
+    }
+
+    // 按数量排序取前10
+    const sortedTypes = [...fileTypes]
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
+    const barOption = {
+      tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+      grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+      xAxis: {
+        type: "category",
+        data: sortedTypes.map((item) => item.type),
+        axisLabel: { rotate: 45 },
       },
-    ],
-  };
-  barChart.setOption(barOption);
+      yAxis: { type: "value", name: "操作次数" },
+      series: [
+        {
+          name: "操作次数",
+          type: "bar",
+          data: sortedTypes.map((item) => item.count),
+          itemStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: "#667eea" },
+              { offset: 1, color: "#764ba2" },
+            ]),
+            borderRadius: [4, 4, 0, 0],
+          },
+        },
+      ],
+    };
+    barChart.setOption(barOption);
+  } catch (error) {
+    console.error("加载文件类型TOP10失败:", error);
+    // 降级：使用当前页数据
+    const typeCount = {};
+    items.value.forEach((item) => {
+      const type = item.file_type || "其他";
+      typeCount[type] = (typeCount[type] || 0) + 1;
+    });
+
+    const sortedTypes = Object.entries(typeCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+
+    if (!barChart) {
+      barChart = echarts.init(barChartRef.value);
+    }
+
+    barChart.setOption({
+      xAxis: { data: sortedTypes.map(([type]) => type) },
+      series: [{ data: sortedTypes.map(([, count]) => count) }],
+    });
+  }
 };
 
 // 筛选变化

@@ -33,6 +33,13 @@ class User(UserBase):
     created_at: Optional[datetime] = None
     last_login: Optional[datetime] = None
     is_active: bool = True
+    department: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    last_ip: Optional[str] = None
+    role_id: Optional[int] = None
+    role_name: Optional[str] = None
+    permissions: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True
@@ -43,6 +50,7 @@ class Token(BaseModel):
     token_type: str
     username: str
     role: str
+    user: Optional[Dict[str, Any]] = None
 
 
 class TokenData(BaseModel):
@@ -322,7 +330,7 @@ class UnreadCountResponse(BaseModel):
 
 # ==================== 浏览器历史 ====================
 class BrowserHistoryBase(BaseModel):
-    employee_id: str
+    employee_id: Optional[str] = None
     client_id: Optional[str] = None
     url: str
     title: Optional[str] = None
@@ -345,7 +353,7 @@ class BrowserHistory(BrowserHistoryBase):
 
 # ==================== 软件使用 ====================
 class AppUsageBase(BaseModel):
-    employee_id: str
+    employee_id: Optional[str] = None
     client_id: Optional[str] = None
     app_name: str
     app_path: Optional[str] = None
@@ -372,7 +380,7 @@ class AppUsage(AppUsageBase):
 
 # ==================== 文件操作 ====================
 class FileOperationBase(BaseModel):
-    employee_id: str
+    employee_id: Optional[str] = None
     client_id: Optional[str] = None
     operation: str
     file_path: str

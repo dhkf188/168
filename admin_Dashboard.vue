@@ -86,7 +86,9 @@
               />
               <div class="activity-content">
                 <div class="activity-title">
-                  <span class="employee">{{ act.employee_name || act.employee_id }}</span>
+                  <span class="employee">{{
+                    act.employee_name || act.employee_id
+                  }}</span>
                   <span class="action">{{ act.action }}</span>
                 </div>
                 <div class="activity-time">{{ act.time }}</div>
@@ -191,6 +193,7 @@
 import { ref, onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { useUserStore } from "./admin_stores";
 import {
   Camera,
   User,
@@ -205,6 +208,7 @@ import {
 import * as echarts from "echarts";
 import { statsApi, cleanupApi } from "./admin_api";
 
+const userStore = useUserStore();
 const router = useRouter();
 const hourlyChartRef = ref(null);
 const formatChartRef = ref(null);
@@ -256,7 +260,6 @@ const stats = ref([
 const loadStats = async () => {
   try {
     const data = await statsApi.getStats();
-    console.log("仪表盘数据:", data); // 添加调试日志
 
     stats.value[0].value = data.today;
     stats.value[1].value = data.online;
@@ -275,10 +278,8 @@ const loadStats = async () => {
 
     // 确保数据结构正确
     recentActivities.value = data.recent_activities || [];
-    console.log("最近活动:", recentActivities.value);
 
     topEmployees.value = data.top_employees || [];
-    console.log("TOP员工:", topEmployees.value);
 
     // 渲染图表
     if (data.hourly) {
@@ -294,6 +295,11 @@ const loadStats = async () => {
 
 // 加载清理状态
 const loadCleanupStatus = async () => {
+  // ✅ 只有管理员或拥有 settings:view 权限的用户才加载清理状态
+  if (!userStore.hasPermission("settings:view")) {
+    return;
+  }
+
   try {
     cleanupStatus.value = await cleanupApi.getCleanupStatus();
   } catch (error) {

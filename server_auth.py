@@ -1,3 +1,4 @@
+# server_auth.py - 修复版
 """
 认证授权模块 - 使用 werkzeug 替代 passlib
 """
@@ -27,11 +28,21 @@ def get_password_hash(password: str) -> str:
     return generate_password_hash(password, method="pbkdf2:sha256")
 
 
+# server_auth.py
+
 def authenticate_user(db: Session, username: str, password: str):
     """验证用户"""
     user = db.query(models.User).filter(models.User.username == username).first()
-    if not user or not verify_password(password, user.password_hash):
+    
+    
+    if not user:
         return False
+        
+    is_valid = verify_password(password, user.password_hash)
+    
+    if not is_valid:
+        return False
+        
     return user
 
 
@@ -59,14 +70,12 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     encoded_jwt = jwt.encode(to_encode, Config.SECRET_KEY, algorithm=Config.ALGORITHM)
     return encoded_jwt
 
-
-# server_auth.py - 增强的token验证
-
-
 async def get_current_user(
-    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+    token: str = Depends(oauth2_scheme), 
+    db: Session = Depends(get_db)
 ):
-    """获取当前用户 - 增强版，检查密码修改时间"""
+    """获取当前用户"""
+    
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="无效的认证凭证",
@@ -76,33 +85,21 @@ async def get_current_user(
     try:
         payload = jwt.decode(token, Config.SECRET_KEY, algorithms=[Config.ALGORITHM])
         username: str = payload.get("sub")
-        token_iat = payload.get("iat")  # token签发时间
-
+        
         if username is None:
             raise credentials_exception
-    except JWTError:
+            
+    except jwt.ExpiredSignatureError as e:
+        raise credentials_exception
+    except jwt.JWTError as e:
+        raise credentials_exception
+    except Exception as e:
         raise credentials_exception
 
     user = db.query(models.User).filter(models.User.username == username).first()
     if user is None:
         raise credentials_exception
-
-    # 检查密码是否在token签发后被修改过
-    if user.password_changed_at and token_iat:
-        # 将token签发时间（Unix时间戳）转换为datetime
-        from datetime import timezone
-
-        token_iat_dt = datetime.fromtimestamp(token_iat, tz=timezone.utc)
-
-        # 如果密码修改时间晚于token签发时间，说明这个token是旧密码时期的
-        if user.password_changed_at > token_iat_dt:
-            logger.warning(f"用户 {username} 使用旧密码的token尝试访问")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="密码已修改，请重新登录",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-
+    
     return user
 
 
@@ -122,3 +119,52 @@ async def get_current_admin_user(
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return current_user
+
+
+# ==================== 权限检查函数 ====================
+
+class PermissionChecker:
+    """权限检查依赖"""
+    
+    def __init__(self, required_permission: str):
+        self.required_permission = required_permission
+    
+    async def __call__(
+        self,
+        current_user: models.User = Depends(get_current_active_user),
+    ):
+        
+        if not check_permission(current_user, self.required_permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"缺少权限: {self.required_permission}",
+            )
+        return current_user
+
+
+def check_permission(user: models.User, required_permission: str) -> bool:
+    """检查用户是否有指定权限"""
+    if not user:
+        return False
+
+    # 超级管理员拥有所有权限
+    if user.role == "admin":
+        return True
+
+    # ✅ 关键修复：使用 effective_permissions 而不是 permissions
+    # effective_permissions 会自动合并角色权限和用户自定义权限
+    user_perms = user.effective_permissions
+    
+    if not user_perms:
+        return False
+
+    if isinstance(user_perms, dict):
+        if user_perms.get("type") == "all":
+            return True
+        perms = user_perms.get("permissions", [])
+        return required_permission in perms
+    
+    if isinstance(user_perms, list):
+        return required_permission in user_perms
+
+    return False

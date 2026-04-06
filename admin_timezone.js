@@ -132,6 +132,11 @@ export function getCurrentBeijingTime() {
   return getNow().format("YYYY-MM-DD HH:mm:ss");
 }
 
+export function formatDate(datetime, format = "YYYY-MM-DD") {
+  if (!datetime) return "未知";
+  return toBeijingTime(datetime).format(format);
+}
+
 export default {
   formatDateTime,
   formatTime,

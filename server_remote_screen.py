@@ -275,6 +275,22 @@ class SafeWebSocketSender:
         self.uncompressed_frames = 0
         self.compressed_bytes_saved = 0
 
+    async def send_bytes(self, data: bytes) -> bool:
+        """直接发送二进制数据"""
+        if self.closed:
+            return False
+
+        try:
+            await asyncio.wait_for(
+                self.websocket.send_bytes(data), timeout=WS_SEND_TIMEOUT
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.debug(f"会话 {self.session_id} 发送超时")
+        except Exception as e:
+            logger.debug(f"会话 {self.session_id} 发送失败: {e}")
+        return False
+
     async def start(self):
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self._send_loop())
@@ -351,24 +367,45 @@ class SafeWebSocketSender:
             return message
 
     async def _send_loop(self):
+        """发送循环 - 负责从队列中提取消息并发送"""
         while not self.closed:
             try:
+                # 从队列中获取待发送的消息
                 message = await self.queue.get()
+
+                # ✅ 确保 message 是字典，如果是字符串则尝试转换，确保后续处理一致性
+                if isinstance(message, str):
+                    try:
+                        message = json.loads(message)
+                    except Exception:
+                        # 如果转换失败（说明本身就是非 JSON 字符串），直接发送原样字符串
+                        json_str = message
+                        await self.websocket.send_text(json_str)
+                        self.queue.task_done()
+                        continue
+
+                # ✅ 此时 message 确定为字典，统一序列化为 JSON 字符串
+                # 使用 ensure_ascii=False 以便在日志和传输中直接显示中文字符
                 json_str = json.dumps(message, ensure_ascii=False)
 
-                logger.info(f"📤 [发送队列] 取出消息: {message.get('type')}")
-                logger.info(f"📤 [发送队列] 消息内容: {message}")
+                msg_type = message.get("type", "unknown")
+                # 生产环境建议对大的 payload（如图像数据）进行日志截断
 
                 try:
+                    # 使用 wait_for 防止因网络拥塞导致发送协程永久挂起
                     await asyncio.wait_for(
                         self.websocket.send_text(json_str), timeout=WS_SEND_TIMEOUT
                     )
                 except asyncio.TimeoutError:
-                    logger.debug(f"会话 {self.session_id} 发送超时")
+                    logger.debug(f"会话 {self.session_id} 发送超时 (type: {msg_type})")
                 except Exception as e:
                     logger.debug(f"会话 {self.session_id} 发送失败: {e}")
+                finally:
+                    # 标记任务完成
+                    self.queue.task_done()
 
             except asyncio.CancelledError:
+                # 协程被取消（如连接关闭），优雅退出循环
                 break
             except Exception as e:
                 logger.debug(f"会话 {self.session_id} 发送循环异常: {e}")
@@ -508,7 +545,7 @@ async def verify_websocket_token(
 
 
 async def safe_websocket_send(websocket: WebSocket, message: Dict) -> bool:
-    """安全的WebSocket发送"""
+    """安全的WebSocket发送 - 确保 JSON 格式"""
     if not websocket:
         return False
 
@@ -518,8 +555,11 @@ async def safe_websocket_send(websocket: WebSocket, message: Dict) -> bool:
     except Exception:
         return False
 
-    json_str = safe_json_dumps(message)
-    if not json_str:
+    # ✅ 确保使用 json.dumps 转换为 JSON 字符串
+    try:
+        json_str = json.dumps(message, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"JSON生成失败: {e}")
         return False
 
     try:
@@ -1119,14 +1159,11 @@ class RemoteSessionManager:
         # ✅ 1. 先尝试通过管理员会话发送（如果有管理员在查看该员工）
         items = await self.get_websockets_by_client(client_id)
 
-        self.logger.info(
-            f"📢 broadcast_to_client: client_id={client_id}, items={len(items)}"
-        )
+      
 
         if items:
             tasks = []
             for sid, sender in items:
-                self.logger.info(f"   发送到管理员会话: {sid}")
                 # sender.send 通常是自定义封装类，接受字典并在内部序列化
                 task = asyncio.create_task(sender.send(message))
                 tasks.append(task)
@@ -1146,16 +1183,12 @@ class RemoteSessionManager:
                 # 它会自动处理 json.dumps 并以正确的文本帧格式发送，避免类型报错
                 await client_ws.send_json(message)
                 success_count += 1
-                self.logger.info(f"📢 直接发送到客户端 {client_id} 成功")
             except Exception as e:
                 self.logger.error(
                     f"📢 直接发送到客户端 {client_id} 失败: {e}", exc_info=True
                 )
 
-        if success_count > 0:
-            self.logger.info(f"📢 广播成功: {success_count} 个接收者")
-        else:
-            self.logger.warning(f"📢 广播失败: 0 个接收者")
+       
 
         return success_count
 
@@ -1165,17 +1198,11 @@ class RemoteSessionManager:
         viewer_count = 0  # ✅ 在锁外定义变量
 
         async with self._lock:
-            self.logger.info(f"📊 完整映射: {dict(self.client_to_admin)}")
             sessions = self.client_to_admin.get(client_id, set())
             viewer_count = len(sessions)
 
-            # ✅ 添加详细日志
-            self.logger.info(
-                f"📊 broadcast_viewer_update: client_id={client_id}, viewer_count={viewer_count}, sessions={list(sessions)}"
-            )
-
+      
             if not sessions:
-                self.logger.info(f"   ⚠️ 没有活跃会话，跳过广播")
                 return
 
             if not force:
@@ -1196,7 +1223,6 @@ class RemoteSessionManager:
                     self.active_sessions[sid]["last_viewer_update"] = now
 
         # ✅ 现在 viewer_count 肯定有值
-        self.logger.info(f"📢 准备广播观众更新: viewers={viewer_count}")
         result = await self.broadcast_to_client(
             client_id,
             {
@@ -1205,7 +1231,6 @@ class RemoteSessionManager:
                 "timestamp": now,
             },
         )
-        self.logger.info(f"📢 广播结果: {result} 个客户端收到")
 
     async def get_viewer_count(self, client_id: str) -> int:
         """获取客户端的观众数量"""
@@ -1215,65 +1240,100 @@ class RemoteSessionManager:
     async def forward_frame_to_admins(
         self, client_id: str, message: str, frame_size: int
     ):
-        """低延迟转发 - 支持二进制传输优化"""
-
-        # 解析消息
+        """低延迟转发 - 支持 WebP 和 JPEG，支持新协议"""
         try:
             data = json.loads(message)
             if data.get("type") != "frame":
                 return
-        except:
+        except Exception as e:
+            self.logger.error(f"❌ 解析消息失败: {e}")
             return
 
-        # 获取所有管理员会话
         items = await self.get_websockets_by_client(client_id)
         if not items:
+            self.logger.warning("⚠️ 没有管理员会话，丢弃帧")
             return
 
-        # ✅ 预解码 JPEG 数据并提取尺寸信息
         try:
-            jpeg_data = base64.b64decode(data["data"])
-            width = data.get("width", 1280)
-            height = data.get("height", 720)
-        except Exception as e:
-            self.logger.debug(f"解码失败: {e}")
-            return
+            encoded_data = data.get("data")
+            if not encoded_data:
+                self.logger.error("❌ 缺少 data 字段")
+                return
 
-        # ✅ 批量发送二进制帧（带简单帧头）
-        for sid, sender in items:
-            try:
-                # 构建帧头（8字节）：[版本(1)] [帧类型(1)] [宽度(2)] [高度(2)] [保留(2)]
-                header = bytearray()
-                header.append(1)  # 版本号
-                header.append(self._get_frame_type_code(data))  # 帧类型
-                header.extend(width.to_bytes(2, "big"))  # 宽度
-                header.extend(height.to_bytes(2, "big"))  # 高度
-                header.extend((0).to_bytes(2, "big"))  # 保留
+            image_data = base64.b64decode(encoded_data)
+            img_format = data.get("format", "jpeg")
 
-                binary_frame = bytes(header) + jpeg_data
-
-                if hasattr(sender, "websocket"):
-                    await sender.websocket.send_bytes(binary_frame)
-                elif hasattr(sender, "send_bytes"):
-                    await sender.send_bytes(binary_frame)
+            # ✅ 验证格式
+            if img_format == "webp":
+                if len(image_data) >= 4 and image_data[0:4] == b"RIFF":
+                    self.logger.dgbug(f"✅ WebP 格式验证通过，大小={len(image_data)}")
                 else:
-                    # 降级到文本发送
-                    await sender.send(
-                        json.dumps(
-                            {
-                                "type": "frame",
-                                "data": base64.b64encode(jpeg_data).decode(),
-                                "compressed": True,
-                                "width": width,
-                                "height": height,
-                            }
-                        )
-                    )
+                    self.logger.dgbug(f"❌ WebP 头无效: {image_data[:4].hex()}")
+                    return
+            elif img_format == "jpeg":
+                if (
+                    len(image_data) >= 2
+                    and image_data[0] == 0xFF
+                    and image_data[1] == 0xD8
+                ):
+                    self.logger.dgbug(f"✅ JPEG 格式验证通过，大小={len(image_data)}")
+                else:
+                    self.logger.error(f"❌ JPEG 头无效: {image_data[:2].hex()}")
+                    return
 
-                # 更新统计
-                asyncio.create_task(self.update_frame_stats(sid, len(jpeg_data)))
-            except Exception as e:
-                self.logger.debug(f"发送失败 sid={sid}: {e}")
+            width = int(data.get("width", 1280))
+            height = int(data.get("height", 720))
+
+            # ✅ 获取帧ID和时间戳（如果有）
+            frame_id = data.get("frame_id", 0)
+            timestamp_ms = data.get("timestamp_ms", int(time.time() * 1000))
+
+            # ✅ 构建20字节帧头（新协议）
+            header = bytearray(20)
+            header[0] = 2  # 版本号2（新协议）
+            header[1] = self._get_frame_type_code(data)
+            header[2:4] = width.to_bytes(2, "big")
+            header[4:6] = height.to_bytes(2, "big")
+            header[6:8] = (0).to_bytes(2, "big")  # 保留
+            header[8:12] = frame_id.to_bytes(4, "big")
+            header[12:16] = timestamp_ms.to_bytes(4, "big")
+            header[16:20] = len(image_data).to_bytes(4, "big")
+
+            binary_frame = bytes(header) + image_data
+
+            # 转发
+            for sid, sender in items:
+                try:
+                    if hasattr(sender, "send_bytes"):
+                        await sender.send_bytes(binary_frame)
+                    elif hasattr(sender, "websocket") and hasattr(
+                        sender.websocket, "send_bytes"
+                    ):
+                        await sender.websocket.send_bytes(binary_frame)
+                    else:
+                        await sender.send(
+                            json.dumps(
+                                {
+                                    "type": "frame",
+                                    "data": encoded_data,
+                                    "width": width,
+                                    "height": height,
+                                    "format": img_format,
+                                    "frame_id": frame_id,
+                                    "timestamp_ms": timestamp_ms,
+                                }
+                            )
+                        )
+
+                    asyncio.create_task(self.update_frame_stats(sid, len(image_data)))
+
+                except Exception as e:
+                    self.logger.error(f"❌ 发送失败 sid={sid}: {e}")
+
+          
+
+        except Exception as e:
+            self.logger.error(f"❌ 转发失败: {e}", exc_info=True)
 
     def _get_frame_type_code(self, data: dict) -> int:
         """获取帧类型编码"""
@@ -1612,12 +1672,9 @@ async def websocket_admin_endpoint(
     reconnect_token = websocket.query_params.get("reconnect_token")
 
     try:
-        logger.info("=" * 60)
-        logger.info(f"👤 管理员连接请求: employee_id={employee_id}")
 
         # ==================== 断线重连处理 ====================
         if reconnect_token:
-            logger.info(f"🔄 检测到断线重连请求，token: {reconnect_token[:20]}...")
 
             # ✅ 1. 先接受 WebSocket 连接
             await websocket.accept()
@@ -1660,7 +1717,6 @@ async def websocket_admin_endpoint(
 
             if recovered_session_id:
                 session_id = recovered_session_id
-                logger.info(f"✅ 会话恢复成功: {session_id}")
 
                 # 6. 确认 client_id（从恢复的会话中获取）
                 session_info = await session_manager.get_session(session_id)
@@ -1757,10 +1813,7 @@ async def websocket_admin_endpoint(
             return
 
         await websocket.accept()
-        logger.info(
-            f"✅ WebSocket连接已接受: 管理员={username}, 员工={sanitized_employee_id}"
-        )
-
+     
         # 检查是否启用压缩
         enable_compression = client_config.get(
             "enable_compression", COMPRESSION_ENABLED
@@ -1775,13 +1828,10 @@ async def websocket_admin_endpoint(
         )
         async with session_manager._lock:
             sessions = session_manager.client_to_admin.get(client_id, set())
-            logger.info(
-                f"🔍 创建后检查: client_id={client_id}, 会话数={len(sessions)}, 会话列表={list(sessions)}"
-            )
+        
 
         # ✅ 先获取当前观众数
         viewer_count = await session_manager.get_viewer_count(client_id)
-        logger.info(f"📊 当前观众数: {viewer_count}")
 
         # 广播观众更新
         await _broadcast_viewer_update(client_id)
@@ -1835,7 +1885,6 @@ async def websocket_client_endpoint(websocket: WebSocket, client_id: str):
     客户端WebSocket端点（支持二进制和文本消息）
     """
     try:
-        logger.info("=" * 60)
         logger.info(f"💻 客户端连接请求: client_id={client_id}")
 
         sanitized_client_id = validate_client_id(client_id)

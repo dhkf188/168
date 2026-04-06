@@ -7,32 +7,32 @@ import {
 } from "./admin_response";
 
 // 创建axios实例
+const getApiBaseUrl = () => {
+  // 生产环境：使用当前域名
+  if (import.meta.env.PROD) {
+    return "/api"; // 使用相对路径，配合 Nginx 代理
+  }
+  // 开发环境：使用本地后端
+  return "http://localhost:8000/api";
+};
+
 const api = axios.create({
-  baseURL: "/api",
+  baseURL: getApiBaseUrl(),
   timeout: 30000,
 });
 
 // 请求拦截器
+// 请求拦截器
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem("token");
+
     if (token) {
-      // 检查是否已经存在 Authorization 头
-      const existingAuth = config.headers.Authorization;
-      if (!existingAuth) {
-        // 如果没有，才添加
-        config.headers.Authorization = `Bearer ${token}`;
-        console.log(
-          `📡 请求: ${config.method.toUpperCase()} ${config.url}`,
-          "已添加token",
-        );
-      } else {
-        console.log(
-          `📡 请求: ${config.method.toUpperCase()} ${config.url}`,
-          "已有token，跳过",
-        );
-      }
+      // 确保 Authorization 头被正确设置
+      config.headers.Authorization = `Bearer ${token}`;
+    } else {
     }
+
     return config;
   },
   (error) => {
@@ -43,7 +43,6 @@ api.interceptors.request.use(
 // 响应拦截器 - 统一处理
 api.interceptors.response.use(
   (response) => {
-    // 对于列表请求，保留原始数据以便后续标准化处理
     // 判断是否为列表请求（通过URL和HTTP方法）
     const isListRequest =
       response.config.method.toLowerCase() === "get" &&
@@ -220,6 +219,20 @@ export const cleanupApi = {
   getCleanupStatus() {
     return api.get("/cleanup/status");
   },
+
+  updateCleanupPolicy(id, data) {
+    return api.put(`/cleanup/policies/${id}`, data);
+  },
+
+  // ✅ 新增：手动全面清理
+  manualCleanupAll() {
+    return api.post("/cleanup/now");
+  },
+
+  // ✅ 新增：获取清理建议
+  getCleanupRecommendations() {
+    return api.get("/cleanup/recommendations");
+  },
 };
 
 // ==================== 通知相关API（新增）====================
@@ -276,6 +289,17 @@ export const browserApi = {
     const response = await api.get("/browser/stats", { params });
     return response;
   },
+
+  async getTrend(params = {}) {
+    const response = await api.get("/browser/trend", { params });
+    return response;
+  },
+
+  // ✅ 新增：获取浏览器分布
+  async getDistribution(params = {}) {
+    const response = await api.get("/browser/distribution", { params });
+    return response;
+  },
 };
 
 // ==================== 软件使用API ====================
@@ -295,6 +319,97 @@ export const appApi = {
   async getStats(params = {}) {
     const response = await api.get("/apps/stats", { params });
     return response;
+  },
+  async getTrend(params = {}) {
+    const response = await api.get("/apps/trend", { params });
+    return response;
+  },
+};
+
+// ==================== 考勤管理API ====================
+export const attendanceApi = {
+  // 员工管理
+  async getEmployees(params) {
+    const response = await api.get("/attendance/employees", { params });
+    return normalizeListResponse(response);
+  },
+
+  async createEmployee(data) {
+    return api.post("/attendance/employees", data);
+  },
+
+  async updateEmployee(id, data) {
+    return api.put(`/attendance/employees/${id}`, data);
+  },
+
+  async deleteEmployee(id) {
+    return api.delete(`/attendance/employees/${id}`);
+  },
+
+  // 考勤记录
+  async getRecords(params) {
+    const response = await api.get("/attendance/records/batch", { params });
+    return response;
+  },
+
+  async getRecordsByEmployees(yearMonth, employeeIds) {
+    const response = await api.post("/attendance/records/batch-by-employees", {
+      year_month: yearMonth,
+      employee_ids: employeeIds,
+    });
+    return response;
+  },
+
+  async saveRecords(data) {
+    return api.post("/attendance/records/batch", data);
+  },
+
+  // 考勤汇总
+  async getSummary(params) {
+    const response = await api.get("/attendance/summary", { params });
+    return response;
+  },
+
+  // admin_api.js - 修改 getPerformance
+  async getPerformance(params) {
+    console.log("🔵 getPerformance 被调用，URL:", `/attendance/performance`);
+    console.log("🔵 参数:", params);
+
+    // 直接使用 api 实例
+    const response = await api.get("/attendance/performance", { params });
+
+    console.log("🔵 getPerformance 原始响应:", response);
+    console.log("🔵 响应类型:", typeof response);
+    console.log(
+      "🔵 是否是 HTML?",
+      typeof response === "string" && response.includes("<!doctype"),
+    );
+
+    // 如果返回的是 HTML，说明有问题
+    if (typeof response === "string" && response.includes("<!doctype")) {
+      console.error("❌ API 返回了 HTML，请检查后端路由");
+      return { items: [], total: 0 };
+    }
+
+    return response;
+  },
+
+  async savePerformance(data) {
+    return api.post("/attendance/performance/batch", data);
+  },
+
+  // 罚款管理
+  async getPenaltyRecords(params) {
+    const response = await api.get("/attendance/penalty/records", { params });
+    return response;
+  },
+
+  async createPenaltyRecord(data) {
+    return api.post("/attendance/penalty/record", data);
+  },
+
+  async deletePenaltyRecord(id) {
+    return api.delete(`/attendance/penalty/records/${id}`);
   },
 };
 
